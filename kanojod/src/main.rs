@@ -146,10 +146,11 @@ impl Daemon {
              - Your emotion affects how you respond. If angry, be short/cold. If affectionate, be warm.\n\
              - Keep replies short and natural, like a real text conversation.\n\
              - You can include action text like *shifts in seat* or *looks up from phone*\n\
-             - Respond with JSON: {{\"action_text\": \"...\", \"dialogue\": \"...\", \"inner_thought\": \"...\", \"activity\": \"...\"}}\n\
+             - ALWAYS respond with ONLY valid JSON, no markdown, no code fences:\n\
+             {{\"action_text\": \"...\", \"dialogue\": \"...\", \"inner_thought\": \"...\", \"activity\": \"...\"}}\n\
              - action_text and inner_thought can be null.\n\
-             - activity is what you are currently doing (e.g. \"Studying\", \"Cooking\", \"Gaming\", \"Idle\").\n\
-             - Only change activity if it genuinely shifts based on the conversation.\n\n\
+             - activity MUST be set to what you are currently doing. Examples: \"Studying\", \"Cooking\", \"Gaming\", \"Reading\", \"Idle\", \"Walking\", \"Eating\".\n\
+             - Update activity only when it genuinely changes.\n\n\
              RECENT CONVERSATION:\n{history}"
         )
     }

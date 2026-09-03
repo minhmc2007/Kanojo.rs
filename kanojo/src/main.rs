@@ -533,7 +533,11 @@ fn cmd_tui() -> Result<()> {
                         msg_id += 1;
                     }
                     KeyCode::Char(c) => {
-                        state.input.push(c);
+                        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) && c == 'c' {
+                            state.input.clear();
+                        } else {
+                            state.input.push(c);
+                        }
                     }
                     KeyCode::Backspace => {
                         state.input.pop();
