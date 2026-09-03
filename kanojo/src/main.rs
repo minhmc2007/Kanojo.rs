@@ -161,19 +161,17 @@ fn cmd_gateway() -> Result<()> {
     Ok(())
 }
 
-// --- Ratatui TUI ---
-
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEvent, MouseEventKind,
+        MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -206,7 +204,8 @@ struct TuiState {
     entries: VecDeque<ChatEntry>,
     input: String,
     cursor_pos: usize,
-    scroll_offset: usize,
+    scroll_from_bottom: usize,
+    max_scroll: usize,
     is_waiting: bool,
     emotion: String,
     activity: String,
@@ -222,7 +221,8 @@ impl TuiState {
             entries: VecDeque::new(),
             input: String::new(),
             cursor_pos: 0,
-            scroll_offset: 0,
+            scroll_from_bottom: 0,
+            max_scroll: 0,
             is_waiting: false,
             emotion: "Casual".into(),
             activity: "Idle".into(),
@@ -235,11 +235,18 @@ impl TuiState {
 
     fn push_entry(&mut self, entry: ChatEntry) {
         self.entries.push_back(entry);
-        self.scroll_offset = self.entries.len();
     }
 
-    fn max_scroll(&self) -> usize {
-        self.entries.len()
+    fn scroll_up(&mut self, delta: usize) {
+        self.scroll_from_bottom = (self.scroll_from_bottom + delta).min(self.max_scroll.max(delta));
+    }
+
+    fn scroll_down(&mut self, delta: usize) {
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(delta);
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.scroll_from_bottom = 0;
     }
 
     fn update_suggestions(&mut self) {
@@ -271,7 +278,7 @@ fn emotion_color(emotion: &str) -> Color {
     }
 }
 
-fn draw_ui(f: &mut Frame, state: &TuiState, config: &Config) {
+fn draw_ui(f: &mut Frame, state: &mut TuiState, config: &Config) {
     let mut constraints = vec![
         Constraint::Length(3),
         Constraint::Min(1),
@@ -337,7 +344,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, state: &TuiState, config: &Config)
     f.render_widget(status, area);
 }
 
-fn draw_chat_area(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) {
+fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState, config: &Config) {
     let mut lines: Vec<Line> = Vec::new();
 
     for entry in &state.entries {
@@ -403,16 +410,62 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) 
         )));
     }
 
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    let mut total_lines = 0;
+    for line in &lines {
+        let w = line.width();
+        let rows = if inner_width > 0 {
+            (w.max(1) + inner_width - 1) / inner_width
+        } else {
+            1
+        };
+        total_lines += rows;
+    }
+
+    let max_scroll = total_lines.saturating_sub(inner_height);
+    state.max_scroll = max_scroll;
+    if state.scroll_from_bottom > max_scroll {
+        state.scroll_from_bottom = max_scroll;
+    }
+
+    let scroll_y = max_scroll.saturating_sub(state.scroll_from_bottom);
+
+    let title = if state.scroll_from_bottom > 0 {
+        format!(" Chat [Scrolled +{}] ", state.scroll_from_bottom)
+    } else {
+        " Chat ".to_string()
+    };
+
     let chat = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Chat ")
+                .title(title)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_y as u16, 0));
 
     f.render_widget(chat, area);
+
+    if max_scroll > 0 {
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll_y);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
 }
 
 fn draw_suggestions(f: &mut Frame, area: Rect, state: &TuiState) {
@@ -530,7 +583,7 @@ fn cmd_tui() -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -593,7 +646,7 @@ fn cmd_tui() -> Result<()> {
     }
     if !connected {
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
         return Err(anyhow::anyhow!(
             "failed to connect to daemon at {}",
             socket_path.display()
@@ -603,140 +656,164 @@ fn cmd_tui() -> Result<()> {
     let mut msg_id: u64 = 1;
 
     loop {
-        terminal.draw(|f| draw_ui(f, &state, &config))?;
+        terminal.draw(|f| draw_ui(f, &mut state, &config))?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Esc => {
-                        if state.is_waiting {
-                            state.is_waiting = false;
-                            state.entries.retain(|e| !matches!(e, ChatEntry::Typing));
-                        } else {
-                            state.input.clear();
-                            state.cursor_pos = 0;
-                            state.suggestions.clear();
-                        }
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
                     }
-                    KeyCode::Tab => {
-                        if !state.suggestions.is_empty() {
-                            let (cmd, _) = state.suggestions[state.suggestion_idx];
-                            state.input.clear();
-                            state.input.push_str(cmd);
-                            state.input.push(' ');
-                            state.cursor_pos = state.input.len();
-                            state.suggestions.clear();
-                        }
-                    }
-                    KeyCode::Enter => {
-                        let text = state.input.trim().to_string();
-                        if text.is_empty() || state.is_waiting {
-                            continue;
-                        }
-
-                        if text.starts_with('/') {
-                            let cmd_name = text.split_whitespace().next().unwrap_or("");
-                            match cmd_name {
-                                "/exit" | "/quit" => break,
-                                "/new" => {
-                                    state.entries.clear();
-                                    state.error = None;
-                                    state.scroll_offset = 0;
-                                    state.push_entry(ChatEntry::System(
-                                        "Session cleared.".into(),
-                                    ));
-                                }
-                                "/db" => {
-                                    let req = kanojod_ipc::JsonRpcRequest::db_query(msg_id);
-                                    let _ = req_tx.send(req);
-                                    msg_id += 1;
-                                }
-                                "/debug" => {
-                                    let req = kanojod_ipc::JsonRpcRequest::debug_info(msg_id);
-                                    let _ = req_tx.send(req);
-                                    msg_id += 1;
-                                }
-                                _ => {
-                                    state.error = Some(format!("command not found: {}", cmd_name));
-                                }
+                    match key.code {
+                        KeyCode::Esc => {
+                            if state.is_waiting {
+                                state.is_waiting = false;
+                                state.entries.retain(|e| !matches!(e, ChatEntry::Typing));
+                            } else {
+                                state.input.clear();
+                                state.cursor_pos = 0;
+                                state.suggestions.clear();
                             }
+                        }
+                        KeyCode::Tab => {
+                            if !state.suggestions.is_empty() {
+                                let (cmd, _) = state.suggestions[state.suggestion_idx];
+                                state.input.clear();
+                                state.input.push_str(cmd);
+                                state.input.push(' ');
+                                state.cursor_pos = state.input.len();
+                                state.suggestions.clear();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let text = state.input.trim().to_string();
+                            if text.is_empty() || state.is_waiting {
+                                continue;
+                            }
+
+                            if text.starts_with('/') {
+                                let cmd_name = text.split_whitespace().next().unwrap_or("");
+                                match cmd_name {
+                                    "/exit" | "/quit" => break,
+                                    "/new" => {
+                                        state.entries.clear();
+                                        state.error = None;
+                                        state.scroll_to_bottom();
+                                        state.push_entry(ChatEntry::System(
+                                            "Session cleared.".into(),
+                                        ));
+                                    }
+                                    "/db" => {
+                                        let req = kanojod_ipc::JsonRpcRequest::db_query(msg_id);
+                                        let _ = req_tx.send(req);
+                                        msg_id += 1;
+                                    }
+                                    "/debug" => {
+                                        let req = kanojod_ipc::JsonRpcRequest::debug_info(msg_id);
+                                        let _ = req_tx.send(req);
+                                        msg_id += 1;
+                                    }
+                                    _ => {
+                                        state.error = Some(format!("command not found: {}", cmd_name));
+                                    }
+                                }
+                                state.input.clear();
+                                state.cursor_pos = 0;
+                                state.suggestions.clear();
+                                continue;
+                            }
+
+                            state.push_entry(ChatEntry::User(text.clone()));
+                            state.push_entry(ChatEntry::Typing);
+                            state.scroll_to_bottom();
+                            state.is_waiting = true;
+                            state.error = None;
+                            state.show_debug = false;
                             state.input.clear();
                             state.cursor_pos = 0;
                             state.suggestions.clear();
-                            continue;
+                            let req = kanojod_ipc::JsonRpcRequest::send_message(msg_id, "terminal", &text);
+                            let _ = req_tx.send(req);
+                            msg_id += 1;
                         }
-
-                        state.push_entry(ChatEntry::User(text.clone()));
-                        state.push_entry(ChatEntry::Typing);
-                        state.is_waiting = true;
-                        state.error = None;
-                        state.show_debug = false;
-                        state.input.clear();
-                        state.cursor_pos = 0;
-                        state.suggestions.clear();
-                        let req = kanojod_ipc::JsonRpcRequest::send_message(msg_id, "terminal", &text);
-                        let _ = req_tx.send(req);
-                        msg_id += 1;
-                    }
-                    KeyCode::Char(c) => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                            state.input.clear();
+                        KeyCode::Char(c) => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                                state.input.clear();
+                                state.cursor_pos = 0;
+                            } else {
+                                state.input.insert(state.cursor_pos, c);
+                                state.cursor_pos += 1;
+                            }
+                            state.update_suggestions();
+                        }
+                        KeyCode::Backspace => {
+                            if state.cursor_pos > 0 {
+                                state.cursor_pos -= 1;
+                                state.input.remove(state.cursor_pos);
+                            }
+                            state.update_suggestions();
+                        }
+                        KeyCode::Delete => {
+                            if state.cursor_pos < state.input.len() {
+                                state.input.remove(state.cursor_pos);
+                            }
+                            state.update_suggestions();
+                        }
+                        KeyCode::Left => {
+                            if state.cursor_pos > 0 {
+                                state.cursor_pos -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if state.cursor_pos < state.input.len() {
+                                state.cursor_pos += 1;
+                            }
+                        }
+                        KeyCode::Home => {
                             state.cursor_pos = 0;
-                        } else {
-                            state.input.insert(state.cursor_pos, c);
-                            state.cursor_pos += 1;
                         }
-                        state.update_suggestions();
-                    }
-                    KeyCode::Backspace => {
-                        if state.cursor_pos > 0 {
-                            state.cursor_pos -= 1;
-                            state.input.remove(state.cursor_pos);
-                        }
-                        state.update_suggestions();
-                    }
-                    KeyCode::Delete => {
-                        if state.cursor_pos < state.input.len() {
-                            state.input.remove(state.cursor_pos);
-                        }
-                        state.update_suggestions();
-                    }
-                    KeyCode::Left => {
-                        if state.cursor_pos > 0 {
-                            state.cursor_pos -= 1;
-                        }
-                    }
-                    KeyCode::Right => {
-                        if state.cursor_pos < state.input.len() {
-                            state.cursor_pos += 1;
-                        }
-                    }
-                    KeyCode::Home | KeyCode::Up => {
-                        if key.code == KeyCode::Home {
-                            state.cursor_pos = 0;
-                        } else if state.scroll_offset > 0 {
-                            state.scroll_offset -= 1;
-                        }
-                    }
-                    KeyCode::End | KeyCode::Down => {
-                        if key.code == KeyCode::End {
+                        KeyCode::End => {
                             state.cursor_pos = state.input.len();
-                        } else if state.scroll_offset < state.max_scroll() {
-                            state.scroll_offset += 1;
                         }
+                        KeyCode::Up => {
+                            if !state.suggestions.is_empty() {
+                                if state.suggestion_idx > 0 {
+                                    state.suggestion_idx -= 1;
+                                }
+                            } else {
+                                state.scroll_up(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if !state.suggestions.is_empty() {
+                                if state.suggestion_idx + 1 < state.suggestions.len() {
+                                    state.suggestion_idx += 1;
+                                }
+                            } else {
+                                state.scroll_down(1);
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            state.scroll_up(10);
+                        }
+                        KeyCode::PageDown => {
+                            state.scroll_down(10);
+                        }
+                        _ => {}
                     }
-                    KeyCode::PageUp => {
-                        state.scroll_offset = state.scroll_offset.saturating_sub(10);
-                    }
-                    KeyCode::PageDown => {
-                        state.scroll_offset =
-                            (state.scroll_offset + 10).min(state.max_scroll());
-                    }
-                    _ => {}
                 }
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            state.scroll_up(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            state.scroll_down(3);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -832,6 +909,6 @@ fn cmd_tui() -> Result<()> {
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }

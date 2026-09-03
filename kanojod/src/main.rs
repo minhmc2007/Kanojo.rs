@@ -6,6 +6,7 @@ use kanojo_typo::TypoEngine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
@@ -51,7 +52,10 @@ struct ChatResponse {
 impl LlmClient {
     fn from_config(cfg: &Config) -> Self {
         Self {
-            http: Client::new(),
+            http: Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("failed to build HTTP client"),
             base_url: cfg.llm.base_url.clone(),
             model: cfg.llm.model.clone(),
             api_key: cfg.llm.api_key.clone(),
@@ -77,16 +81,25 @@ impl LlmClient {
             max_tokens: self.max_tokens,
         };
 
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        tracing::debug!("LLM request to: {} model: {}", url, self.model);
+
         let mut req = self
             .http
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(&url)
             .json(&body);
 
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
 
-        let resp = req.send().await?.json::<ChatResponse>().await?;
+        tracing::debug!("Sending LLM request...");
+        let resp = req.send().await?;
+        tracing::debug!("LLM response status: {}", resp.status());
+        let text = resp.text().await?;
+        tracing::debug!("LLM raw response (first 300): {}", &text[..text.len().min(300)]);
+        let resp: ChatResponse = serde_json::from_str(&text)?;
+        tracing::debug!("LLM parsed, {} choices", resp.choices.len());
         Ok(resp
             .choices
             .into_iter()
@@ -156,6 +169,7 @@ impl Daemon {
     }
 
     async fn handle_send_message(&self, channel: &str, text: &str) -> Result<CompanionReply> {
+        tracing::debug!("handle_send_message: channel={} text={}", channel, text);
         let emotion = {
             let db = self.db.lock().await;
             db.insert_message("user", channel, text, None, None)?;
@@ -180,7 +194,6 @@ impl Daemon {
         let inner_thought = parsed["inner_thought"].as_str().map(String::from);
         let new_activity = parsed["activity"].as_str().map(String::from);
 
-        // Update activity if LLM reported a change
         if let Some(ref act) = new_activity {
             if !act.is_empty() {
                 let db = self.db.lock().await;
@@ -247,7 +260,10 @@ async fn main() -> Result<()> {
         let daemon = Daemon {
             db: Arc::clone(&daemon.db),
             llm: LlmClient {
-                http: Client::new(),
+                http: Client::builder()
+                    .timeout(Duration::from_secs(60))
+                    .build()
+                    .expect("failed to build HTTP client"),
                 base_url: daemon.llm.base_url.clone(),
                 model: daemon.llm.model.clone(),
                 api_key: daemon.llm.api_key.clone(),

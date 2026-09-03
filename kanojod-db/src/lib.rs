@@ -88,7 +88,6 @@ impl Database {
         Ok(())
     }
 
-    // --- config ---
     pub fn get_config(&self, key: &str) -> SqlResult<Option<String>> {
         self.conn
             .query_row(
@@ -107,7 +106,6 @@ impl Database {
         Ok(())
     }
 
-    // --- relationship ---
     pub fn get_emotion(&self) -> SqlResult<String> {
         self.conn.query_row(
             "SELECT current_emotion FROM relationship WHERE id = 1",
@@ -172,7 +170,6 @@ impl Database {
         Ok(())
     }
 
-    // --- daemon_state ---
     pub fn is_suspended(&self) -> SqlResult<bool> {
         self.conn.query_row(
             "SELECT is_suspended FROM daemon_state WHERE id = 1",
@@ -205,7 +202,6 @@ impl Database {
         Ok(())
     }
 
-    // --- activity_state ---
     pub fn get_activity(&self) -> SqlResult<String> {
         self.conn.query_row(
             "SELECT current_activity FROM activity_state WHERE id = 1",
@@ -238,7 +234,6 @@ impl Database {
         Ok(())
     }
 
-    // --- messages ---
     pub fn insert_message(
         &self,
         sender: &str,
@@ -270,7 +265,6 @@ impl Database {
         Ok(rows)
     }
 
-    // --- emotional engine ---
     pub fn detect_apology(text: &str) -> bool {
         let lower = text.to_lowercase();
         ["sorry", "was busy", "my fault", "apologize", "forgive me", "my bad"]
@@ -314,7 +308,7 @@ impl Database {
             self.set_affection((affection + 5).min(100))?;
         }
 
-        // Warm messages raise affection slightly when anger is low
+        // Anger gate: only boost affection when the user isn't actively upset
         if Self::detect_warmth(text) {
             let anger = self.get_anger()?;
             if anger < 30 {
