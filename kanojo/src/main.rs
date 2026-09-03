@@ -178,6 +178,13 @@ use ratatui::{
 };
 use std::collections::VecDeque;
 
+const COMMANDS: &[(&str, &str)] = &[
+    ("/exit", "quit TUI"),
+    ("/new", "clear session"),
+    ("/db", "show database"),
+    ("/debug", "show debug info"),
+];
+
 #[derive(Clone, Debug)]
 enum ChatEntry {
     User(String),
@@ -193,12 +200,15 @@ enum ChatEntry {
 struct TuiState {
     entries: VecDeque<ChatEntry>,
     input: String,
+    cursor_pos: usize,
     scroll_offset: usize,
     is_waiting: bool,
     emotion: String,
     activity: String,
     error: Option<String>,
     show_debug: bool,
+    suggestions: Vec<(&'static str, &'static str)>,
+    suggestion_idx: usize,
 }
 
 impl TuiState {
@@ -206,12 +216,15 @@ impl TuiState {
         Self {
             entries: VecDeque::new(),
             input: String::new(),
+            cursor_pos: 0,
             scroll_offset: 0,
             is_waiting: false,
             emotion: "Casual".into(),
             activity: "Idle".into(),
             error: None,
             show_debug: false,
+            suggestions: Vec::new(),
+            suggestion_idx: 0,
         }
     }
 
@@ -222,6 +235,21 @@ impl TuiState {
 
     fn max_scroll(&self) -> usize {
         self.entries.len()
+    }
+
+    fn update_suggestions(&mut self) {
+        if self.input.starts_with('/') && !self.input.contains(' ') {
+            let prefix = &self.input[1..];
+            self.suggestions = COMMANDS
+                .iter()
+                .filter(|(cmd, _)| cmd[1..].starts_with(prefix))
+                .copied()
+                .collect();
+            self.suggestion_idx = 0;
+        } else {
+            self.suggestions.clear();
+            self.suggestion_idx = 0;
+        }
     }
 }
 
@@ -239,18 +267,35 @@ fn emotion_color(emotion: &str) -> Color {
 }
 
 fn draw_ui(f: &mut Frame, state: &TuiState, config: &Config) {
+    let mut constraints = vec![
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ];
+
+    if !state.suggestions.is_empty() {
+        let sug_lines = state.suggestions.len() as u16 + 2;
+        constraints.push(Constraint::Length(sug_lines));
+    }
+
+    constraints.push(Constraint::Length(3));
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(3),
-        ])
+        .constraints(constraints)
         .split(f.area());
 
-    draw_status_bar(f, chunks[0], state, config);
-    draw_chat_area(f, chunks[1], state, config);
-    draw_input_box(f, chunks[2], state);
+    let mut idx = 0;
+    draw_status_bar(f, chunks[idx], state, config);
+    idx += 1;
+    draw_chat_area(f, chunks[idx], state, config);
+    idx += 1;
+
+    if !state.suggestions.is_empty() {
+        draw_suggestions(f, chunks[idx], state);
+        idx += 1;
+    }
+
+    draw_input_box(f, chunks[idx], state);
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) {
@@ -365,33 +410,77 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) 
     f.render_widget(chat, area);
 }
 
+fn draw_suggestions(f: &mut Frame, area: Rect, state: &TuiState) {
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, &(cmd, desc)) in state.suggestions.iter().enumerate() {
+        let style = if i == state.suggestion_idx {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:12}", cmd), style),
+            Span::styled(
+                desc.to_string(),
+                if i == state.suggestion_idx {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+        ]));
+    }
+
+    let sug = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Commands ")
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(sug, area);
+}
+
 fn draw_input_box(f: &mut Frame, area: Rect, state: &TuiState) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let prefix = "> ";
     let prefix_len = prefix.len();
     let visible_width = inner_width.saturating_sub(prefix_len);
-    let input_width = state.input.len();
-    let scroll = input_width.saturating_sub(visible_width);
-    let visible_input = if scroll > 0 {
-        &state.input[scroll..]
-    } else {
-        &state.input
-    };
+
+    let visible_pos = state.cursor_pos.min(state.input.len());
+    let scroll = visible_pos.saturating_sub(visible_width);
+    let vis_start = scroll;
+    let vis_end = (scroll + visible_width).min(state.input.len());
+    let visible_input = &state.input[vis_start..vis_end];
 
     let input_line = Line::from(vec![
         Span::styled(prefix, Style::default().fg(Color::Green)),
         Span::raw(visible_input),
     ]);
 
+    let is_cmd = state.input.starts_with('/') && !state.suggestions.is_empty();
+    let title = if state.is_waiting {
+        " Waiting... "
+    } else if is_cmd {
+        " Tab=complete Enter=execute Esc=cancel "
+    } else {
+        " Enter=send Tab=complete Esc=cancel "
+    };
+
     let input = Paragraph::new(input_line).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Enter=send / /exit=quit / /new /db /debug ")
+            .title(title)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(input, area);
 
-    let cursor_x = area.x + prefix_len as u16 + visible_input.len() as u16;
+    let cursor_visual = state.cursor_pos.saturating_sub(scroll);
+    let cursor_x = area.x + prefix_len as u16 + cursor_visual as u16;
     let cursor_y = area.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
 }
@@ -519,12 +608,23 @@ fn cmd_tui() -> Result<()> {
                 }
                 match key.code {
                     KeyCode::Esc => {
-                        // Cancel: clear input or cancel waiting
                         if state.is_waiting {
                             state.is_waiting = false;
                             state.entries.retain(|e| !matches!(e, ChatEntry::Typing));
                         } else {
                             state.input.clear();
+                            state.cursor_pos = 0;
+                            state.suggestions.clear();
+                        }
+                    }
+                    KeyCode::Tab => {
+                        if !state.suggestions.is_empty() {
+                            let (cmd, _) = state.suggestions[state.suggestion_idx];
+                            state.input.clear();
+                            state.input.push_str(cmd);
+                            state.input.push(' ');
+                            state.cursor_pos = state.input.len();
+                            state.suggestions.clear();
                         }
                     }
                     KeyCode::Enter => {
@@ -533,38 +633,40 @@ fn cmd_tui() -> Result<()> {
                             continue;
                         }
 
-                        // Handle slash commands locally
-                        match text.as_str() {
-                            "/exit" | "/quit" => break,
-                            "/new" => {
-                                state.entries.clear();
-                                state.error = None;
-                                state.scroll_offset = 0;
-                                state.push_entry(ChatEntry::System(
-                                    "Session cleared.".into(),
-                                ));
-                                state.input.clear();
-                                continue;
-                            }
-                            "/db" => {
-                                let req = kanojod_ipc::JsonRpcRequest::db_query(msg_id);
-                                if let Ok(json) = serde_json::to_string(&req) {
-                                    let _ = req_tx.send((msg_id, json));
+                        if text.starts_with('/') {
+                            let cmd_name = text.split_whitespace().next().unwrap_or("");
+                            match cmd_name {
+                                "/exit" | "/quit" => break,
+                                "/new" => {
+                                    state.entries.clear();
+                                    state.error = None;
+                                    state.scroll_offset = 0;
+                                    state.push_entry(ChatEntry::System(
+                                        "Session cleared.".into(),
+                                    ));
                                 }
-                                msg_id += 1;
-                                state.input.clear();
-                                continue;
-                            }
-                            "/debug" => {
-                                let req = kanojod_ipc::JsonRpcRequest::debug_info(msg_id);
-                                if let Ok(json) = serde_json::to_string(&req) {
-                                    let _ = req_tx.send((msg_id, json));
+                                "/db" => {
+                                    let req = kanojod_ipc::JsonRpcRequest::db_query(msg_id);
+                                    if let Ok(json) = serde_json::to_string(&req) {
+                                        let _ = req_tx.send((msg_id, json));
+                                    }
+                                    msg_id += 1;
                                 }
-                                msg_id += 1;
-                                state.input.clear();
-                                continue;
+                                "/debug" => {
+                                    let req = kanojod_ipc::JsonRpcRequest::debug_info(msg_id);
+                                    if let Ok(json) = serde_json::to_string(&req) {
+                                        let _ = req_tx.send((msg_id, json));
+                                    }
+                                    msg_id += 1;
+                                }
+                                _ => {
+                                    state.error = Some(format!("command not found: {}", cmd_name));
+                                }
                             }
-                            _ => {}
+                            state.input.clear();
+                            state.cursor_pos = 0;
+                            state.suggestions.clear();
+                            continue;
                         }
 
                         state.push_entry(ChatEntry::User(text.clone()));
@@ -573,26 +675,55 @@ fn cmd_tui() -> Result<()> {
                         state.error = None;
                         state.show_debug = false;
                         state.input.clear();
+                        state.cursor_pos = 0;
+                        state.suggestions.clear();
                         let _ = req_tx.send((msg_id, text));
                         msg_id += 1;
                     }
                     KeyCode::Char(c) => {
                         if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                             state.input.clear();
+                            state.cursor_pos = 0;
                         } else {
-                            state.input.push(c);
+                            state.input.insert(state.cursor_pos, c);
+                            state.cursor_pos += 1;
                         }
+                        state.update_suggestions();
                     }
                     KeyCode::Backspace => {
-                        state.input.pop();
+                        if state.cursor_pos > 0 {
+                            state.cursor_pos -= 1;
+                            state.input.remove(state.cursor_pos);
+                        }
+                        state.update_suggestions();
                     }
-                    KeyCode::Up => {
-                        if state.scroll_offset > 0 {
+                    KeyCode::Delete => {
+                        if state.cursor_pos < state.input.len() {
+                            state.input.remove(state.cursor_pos);
+                        }
+                        state.update_suggestions();
+                    }
+                    KeyCode::Left => {
+                        if state.cursor_pos > 0 {
+                            state.cursor_pos -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if state.cursor_pos < state.input.len() {
+                            state.cursor_pos += 1;
+                        }
+                    }
+                    KeyCode::Home | KeyCode::Up => {
+                        if key.code == KeyCode::Home {
+                            state.cursor_pos = 0;
+                        } else if state.scroll_offset > 0 {
                             state.scroll_offset -= 1;
                         }
                     }
-                    KeyCode::Down => {
-                        if state.scroll_offset < state.max_scroll() {
+                    KeyCode::End | KeyCode::Down => {
+                        if key.code == KeyCode::End {
+                            state.cursor_pos = state.input.len();
+                        } else if state.scroll_offset < state.max_scroll() {
                             state.scroll_offset += 1;
                         }
                     }
