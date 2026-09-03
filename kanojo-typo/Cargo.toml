@@ -1,0 +1,6 @@
+[package]
+name = "kanojo-typo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

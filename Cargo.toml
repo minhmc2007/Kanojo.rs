@@ -1,0 +1,8 @@
+[workspace]
+members = ["kanojod", "kanojo-cli", "kanojo-typo", "kanojod-db", "kanojod-ipc"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"

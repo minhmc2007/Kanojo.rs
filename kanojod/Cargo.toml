@@ -1,0 +1,18 @@
+[package]
+name = "kanojod"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kanojod"
+path = "src/main.rs"
+
+[dependencies]
+kanojod-db = { path = "../kanojod-db" }
+kanojod-ipc = { path = "../kanojod-ipc" }
+kanojo-typo = { path = "../kanojo-typo" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
