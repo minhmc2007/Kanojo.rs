@@ -164,7 +164,10 @@ fn cmd_gateway() -> Result<()> {
 // --- Ratatui TUI ---
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -173,7 +176,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
     Frame, Terminal,
 };
 use std::collections::VecDeque;
@@ -536,7 +541,7 @@ fn cmd_tui() -> Result<()> {
         .enable_all()
         .build()?;
 
-    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<kanojod_ipc::JsonRpcRequest>();
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let sock = socket_path.clone();
 
@@ -557,8 +562,7 @@ fn cmd_tui() -> Result<()> {
 
         loop {
             tokio::select! {
-                Some((id, text)) = req_rx.recv() => {
-                    let req = kanojod_ipc::JsonRpcRequest::send_message(id, "terminal", &text);
+                Some(req) = req_rx.recv() => {
                     if let Ok(json) = serde_json::to_string(&req) {
                         let _ = writer.write_all(json.as_bytes()).await;
                         let _ = writer.write_all(b"\n").await;
@@ -647,16 +651,12 @@ fn cmd_tui() -> Result<()> {
                                 }
                                 "/db" => {
                                     let req = kanojod_ipc::JsonRpcRequest::db_query(msg_id);
-                                    if let Ok(json) = serde_json::to_string(&req) {
-                                        let _ = req_tx.send((msg_id, json));
-                                    }
+                                    let _ = req_tx.send(req);
                                     msg_id += 1;
                                 }
                                 "/debug" => {
                                     let req = kanojod_ipc::JsonRpcRequest::debug_info(msg_id);
-                                    if let Ok(json) = serde_json::to_string(&req) {
-                                        let _ = req_tx.send((msg_id, json));
-                                    }
+                                    let _ = req_tx.send(req);
                                     msg_id += 1;
                                 }
                                 _ => {
@@ -677,7 +677,8 @@ fn cmd_tui() -> Result<()> {
                         state.input.clear();
                         state.cursor_pos = 0;
                         state.suggestions.clear();
-                        let _ = req_tx.send((msg_id, text));
+                        let req = kanojod_ipc::JsonRpcRequest::send_message(msg_id, "terminal", &text);
+                        let _ = req_tx.send(req);
                         msg_id += 1;
                     }
                     KeyCode::Char(c) => {
