@@ -133,7 +133,10 @@ fn cmd_daemon(action: Option<DaemonAction>) -> Result<()> {
                 .arg("kanojod")
                 .output()?;
             if output.status.success() {
-                println!("kanojod is running (pid: {})", String::from_utf8_lossy(&output.stdout).trim());
+                println!(
+                    "kanojod is running (pid: {})",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
             } else {
                 println!("kanojod is not running.");
             }
@@ -175,61 +178,426 @@ fn cmd_gateway() -> Result<()> {
     Ok(())
 }
 
-fn cmd_tui() -> Result<()> {
-    use kanojod_ipc::{JsonRpcRequest, JsonRpcResponse};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
+// --- Ratatui TUI ---
 
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Wrap},
+    Frame, Terminal,
+};
+use std::collections::VecDeque;
+
+#[derive(Clone, Debug)]
+enum ChatEntry {
+    User(String),
+    Companion {
+        action: Option<String>,
+        dialogue: String,
+        thought: Option<String>,
+    },
+    #[allow(dead_code)]
+    System(String),
+    Typing,
+}
+
+struct TuiState {
+    entries: VecDeque<ChatEntry>,
+    input: String,
+    scroll_offset: usize,
+    is_waiting: bool,
+    emotion: String,
+    activity: String,
+    error: Option<String>,
+}
+
+impl TuiState {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            input: String::new(),
+            scroll_offset: 0,
+            is_waiting: false,
+            emotion: "Casual".into(),
+            activity: "Idle".into(),
+            error: None,
+        }
+    }
+
+    fn push_entry(&mut self, entry: ChatEntry) {
+        self.entries.push_back(entry);
+        // Auto-scroll to bottom
+        self.scroll_offset = self.entries.len();
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn emotion_color(emotion: &str) -> Color {
+    match emotion {
+        "InLove" => Color::Magenta,
+        "Affectionate" => Color::LightMagenta,
+        "Casual" => Color::Cyan,
+        "Annoyed" => Color::Yellow,
+        "Angry" => Color::Red,
+        "Furious" => Color::LightRed,
+        "Distant" => Color::DarkGray,
+        _ => Color::White,
+    }
+}
+
+fn draw_ui(f: &mut Frame, state: &TuiState, config: &Config) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Status bar
+            Constraint::Min(1),   // Chat area
+            Constraint::Length(3), // Input box
+        ])
+        .split(f.area());
+
+    draw_status_bar(f, chunks[0], state, config);
+    draw_chat_area(f, chunks[1], state, config);
+    draw_input_box(f, chunks[2], state, config);
+}
+
+fn draw_status_bar(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) {
+    let emotion_color = emotion_color(&state.emotion);
+    let status_line = Line::from(vec![
+        Span::styled(
+            format!(" {} ", config.companion.name),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("{} ", state.emotion),
+            Style::default()
+                .fg(emotion_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("{}", state.activity),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("{} ", config.user.name),
+            Style::default().fg(Color::Blue),
+        ),
+    ]);
+
+    let status = Paragraph::new(status_line).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(status, area);
+}
+
+fn draw_chat_area(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    for entry in &state.entries {
+        match entry {
+            ChatEntry::User(text) => {
+                lines.push(Line::from(Span::styled(
+                    format!("{}> {}", config.user.name, text),
+                    Style::default().fg(Color::Blue),
+                )));
+            }
+            ChatEntry::Companion {
+                action,
+                dialogue,
+                thought,
+            } => {
+                if let Some(a) = action {
+                    lines.push(Line::from(Span::styled(
+                        format!("  *{}*", a),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {}: ", config.companion.name),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(dialogue.clone()),
+                ]));
+                if let Some(t) = thought {
+                    lines.push(Line::from(Span::styled(
+                        format!("    (thought: {})", t),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+            }
+            ChatEntry::System(text) => {
+                lines.push(Line::from(Span::styled(
+                    format!("  [system] {}", text),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            ChatEntry::Typing => {
+                lines.push(Line::from(Span::styled(
+                    "  ...",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                )));
+            }
+        }
+    }
+
+    // Error display
+    if let Some(err) = &state.error {
+        lines.push(Line::from(Span::styled(
+            format!("  [error] {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let chat = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Chat ")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(chat, area);
+}
+
+fn draw_input_box(f: &mut Frame, area: Rect, state: &TuiState, _config: &Config) {
+    let input_line = Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Green)),
+        Span::raw(&state.input),
+    ]);
+
+    let input = Paragraph::new(input_line).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Input (Enter=send, Esc=quit) ")
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(input, area);
+
+    // Show cursor
+    f.set_cursor_position((area.x + 2 + state.input.len() as u16, area.y + 1));
+}
+
+fn cmd_tui() -> Result<()> {
     let config = Config::load()?;
-    let socket_path = &config.daemon.socket_path;
+    let socket_path = std::path::PathBuf::from(&config.daemon.socket_path);
+
+    // Auto-start daemon if socket doesn't exist
+    if !socket_path.exists() {
+        println!("Daemon not running. Starting kanojod...");
+        let kanojod_bin = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("kanojod")))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| "kanojod".into());
+        std::process::Command::new(&kanojod_bin)
+            .spawn()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to start kanojod ({}): {}. Run 'kanojod' manually.",
+                    kanojod_bin.display(),
+                    e
+                )
+            })?;
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if socket_path.exists() {
+                break;
+            }
+        }
+        if !socket_path.exists() {
+            return Err(anyhow::anyhow!(
+                "daemon started but socket not found at {}",
+                socket_path.display()
+            ));
+        }
+    }
+
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut state = TuiState::new();
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let stream = UnixStream::connect(socket_path).await?;
+
+    // Bidirectional daemon channel: send requests, receive responses
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
+    let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    rt.spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
+
+        let stream = match UnixStream::connect(&socket_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = resp_tx.send(format!("__error__:{}", e));
+                return;
+            }
+        };
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
+        let _ = resp_tx.send("__connected__".to_string());
 
-        println!("Connected to kanojod. Type your messages (Ctrl+D to quit).\n");
-
-        let mut msg_id: u64 = 1;
-        let stdin = io::stdin();
         loop {
-            print!("{}> ", config.user.name);
-            io::stdout().flush()?;
-            let mut input = String::new();
-            match stdin.read_line(&mut input) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => break,
-            }
-            let text = input.trim();
-            if text.is_empty() {
-                continue;
-            }
-
-            let req = JsonRpcRequest::send_message(msg_id, "terminal", text);
-            let json = serde_json::to_string(&req)?;
-            writer.write_all(json.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-
-            if let Some(line) = lines.next_line().await? {
-                if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&line) {
-                    if let Some(action) = resp.result["action_text"].as_str() {
-                        println!("  *{}*", action);
+            tokio::select! {
+                Some((id, text)) = req_rx.recv() => {
+                    let req = kanojod_ipc::JsonRpcRequest::send_message(id, "terminal", &text);
+                    if let Ok(json) = serde_json::to_string(&req) {
+                        let _ = writer.write_all(json.as_bytes()).await;
+                        let _ = writer.write_all(b"\n").await;
                     }
-                    if let Some(dialogue) = resp.result["dialogue"].as_str() {
-                        println!("  {}: {}", config.companion.name, dialogue);
-                    }
-                    if let Some(thought) = resp.result["inner_thought"].as_str() {
-                        println!("  (thought: {})", thought);
-                    }
-                    if let Some(emotion) = resp.result["emotion"].as_str() {
-                        println!("  [{}]", emotion);
+                }
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            let _ = resp_tx.send(line);
+                        }
+                        Ok(None) => break,
+                        Err(_) => break,
                     }
                 }
             }
-            msg_id += 1;
         }
-        Ok(())
-    })
+    });
+
+    // Wait for connection
+    let mut connected = false;
+    for _ in 0..50 {
+        if let Ok(msg) = resp_rx.try_recv() {
+            if msg == "__connected__" {
+                connected = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        return Err(anyhow::anyhow!("failed to connect to daemon"));
+    }
+
+    let mut msg_id: u64 = 1;
+
+    loop {
+    terminal.draw(|f| draw_ui(f, &state, &config))?;
+
+        // Handle terminal events
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Esc => break,
+                    KeyCode::Enter => {
+                        let text = state.input.trim().to_string();
+                        if text.is_empty() || state.is_waiting {
+                            continue;
+                        }
+                        state.push_entry(ChatEntry::User(text.clone()));
+                        state.push_entry(ChatEntry::Typing);
+                        state.is_waiting = true;
+                        state.error = None;
+                        let _ = req_tx.send((msg_id, text));
+                        msg_id += 1;
+                    }
+                    KeyCode::Char(c) => {
+                        state.input.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        state.input.pop();
+                    }
+                    KeyCode::Up => {
+                        if state.scroll_offset > 0 {
+                            state.scroll_offset -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if state.scroll_offset < state.max_scroll() {
+                            state.scroll_offset += 1;
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        state.scroll_offset = state.scroll_offset.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        state.scroll_offset =
+                            (state.scroll_offset + 10).min(state.max_scroll());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Handle daemon responses
+        while let Ok(msg) = resp_rx.try_recv() {
+            if msg == "__connected__" || msg.starts_with("__error__") {
+                continue;
+            }
+            // Remove typing indicator
+            state.entries.retain(|e| !matches!(e, ChatEntry::Typing));
+            state.is_waiting = false;
+
+            if let Ok(resp) = serde_json::from_str::<kanojod_ipc::JsonRpcResponse>(&msg) {
+                if let Some(err) = resp.result["error"].as_str() {
+                    state.error = Some(err.to_string());
+                } else {
+                    let action = resp.result["action_text"]
+                        .as_str()
+                        .map(String::from);
+                    let dialogue = resp.result["dialogue"]
+                        .as_str()
+                        .unwrap_or("...")
+                        .to_string();
+                    let thought = resp.result["inner_thought"]
+                        .as_str()
+                        .map(String::from);
+                    if let Some(e) = resp.result["emotion"].as_str() {
+                        state.emotion = e.to_string();
+                    }
+                    state.push_entry(ChatEntry::Companion {
+                        action,
+                        dialogue,
+                        thought,
+                    });
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(())
 }
