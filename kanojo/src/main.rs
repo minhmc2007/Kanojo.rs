@@ -386,21 +386,42 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) 
 }
 
 fn draw_input_box(f: &mut Frame, area: Rect, state: &TuiState, _config: &Config) {
+    // Available width inside the box (accounting for borders)
+    let inner_width = area.width.saturating_sub(2) as usize; // 2 for borders
+    let prefix = "> ";
+    let prefix_len = prefix.len();
+
+    // Scroll input if it's longer than available space
+    let visible_width = inner_width.saturating_sub(prefix_len);
+    let input_width = state.input.len();
+    let scroll = if input_width > visible_width {
+        input_width - visible_width
+    } else {
+        0
+    };
+    let visible_input = if scroll > 0 {
+        &state.input[scroll..]
+    } else {
+        &state.input
+    };
+
     let input_line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Green)),
-        Span::raw(&state.input),
+        Span::styled(prefix, Style::default().fg(Color::Green)),
+        Span::raw(visible_input),
     ]);
 
     let input = Paragraph::new(input_line).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Input (Enter=send, Esc=quit) ")
+            .title(" Input (Enter=send, Ctrl+C=clear, Esc=quit) ")
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(input, area);
 
-    // Show cursor
-    f.set_cursor_position((area.x + 2 + state.input.len() as u16, area.y + 1));
+    // Cursor position: after prefix, at end of visible input
+    let cursor_x = area.x + prefix_len as u16 + visible_input.len() as u16;
+    let cursor_y = area.y + 1;
+    f.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn cmd_tui() -> Result<()> {
@@ -538,6 +559,7 @@ fn cmd_tui() -> Result<()> {
                         state.push_entry(ChatEntry::Typing);
                         state.is_waiting = true;
                         state.error = None;
+                        state.input.clear();
                         let _ = req_tx.send((msg_id, text));
                         msg_id += 1;
                     }
