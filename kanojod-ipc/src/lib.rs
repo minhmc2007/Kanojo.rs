@@ -65,6 +65,14 @@ impl JsonRpcRequest {
     pub fn fetch_state(id: u64) -> Self {
         Self::new(id, "fetch_state", serde_json::Value::Null)
     }
+
+    pub fn db_query(id: u64) -> Self {
+        Self::new(id, "db_query", serde_json::Value::Null)
+    }
+
+    pub fn debug_info(id: u64) -> Self {
+        Self::new(id, "debug_info", serde_json::Value::Null)
+    }
 }
 
 impl JsonRpcResponse {

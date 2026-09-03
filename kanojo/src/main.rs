@@ -41,35 +41,34 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn cmd_init() -> Result<()> {
-    let mut config = Config::default();
-
-    print!("Your name: ");
+fn prompt_with_default(label: &str, current: &str) -> Result<String> {
+    if current.is_empty() {
+        print!("{}: ", label);
+    } else {
+        print!("{} [{}]: ", label, current);
+    }
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     let trimmed = input.trim();
-    if !trimmed.is_empty() {
-        config.user.name = trimmed.to_string();
-    }
+    Ok(if trimmed.is_empty() {
+        current.to_string()
+    } else {
+        trimmed.to_string()
+    })
+}
 
-    print!("Companion name [{}]: ", config.companion.name);
-    io::stdout().flush()?;
-    input.clear();
-    io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-    if !trimmed.is_empty() {
-        config.companion.name = trimmed.to_string();
-    }
+fn cmd_init() -> Result<()> {
+    let mut config = Config::default();
 
-    print!("Persona [{}]: ", config.companion.persona);
-    io::stdout().flush()?;
-    input.clear();
-    io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-    if !trimmed.is_empty() {
-        config.companion.persona = trimmed.to_string();
-    }
+    let val = prompt_with_default("Your name", &config.user.name)?;
+    config.user.name = val;
+
+    let val = prompt_with_default("Companion name", &config.companion.name)?;
+    config.companion.name = val;
+
+    let val = prompt_with_default("Persona", &config.companion.persona)?;
+    config.companion.persona = val;
 
     config.save()?;
     println!("Config saved to {}", config_path().display());
@@ -77,36 +76,20 @@ fn cmd_init() -> Result<()> {
 }
 
 fn cmd_connect() -> Result<()> {
-    let mut config = Config::load()?;
+    let config = Config::load().unwrap_or_default();
 
-    print!("LLM base URL [{}]: ", config.llm.base_url);
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-    if !trimmed.is_empty() {
-        config.llm.base_url = trimmed.to_string();
-    }
+    let val = prompt_with_default("LLM base URL", &config.llm.base_url)?;
+    let mut new_config = config.clone();
+    new_config.llm.base_url = val;
 
-    print!("Model [{}]: ", config.llm.model);
-    io::stdout().flush()?;
-    input.clear();
-    io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-    if !trimmed.is_empty() {
-        config.llm.model = trimmed.to_string();
-    }
+    let val = prompt_with_default("Model", &config.llm.model)?;
+    new_config.llm.model = val;
 
-    print!("API key (optional): ");
-    io::stdout().flush()?;
-    input.clear();
-    io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-    if !trimmed.is_empty() {
-        config.llm.api_key = Some(trimmed.to_string());
-    }
+    let current_key = config.llm.api_key.as_deref().unwrap_or("");
+    let val = prompt_with_default("API key (optional)", current_key)?;
+    new_config.llm.api_key = if val.is_empty() { None } else { Some(val) };
 
-    config.save()?;
+    new_config.save()?;
     println!("LLM config saved.");
     Ok(())
 }
@@ -181,7 +164,7 @@ fn cmd_gateway() -> Result<()> {
 // --- Ratatui TUI ---
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -203,7 +186,6 @@ enum ChatEntry {
         dialogue: String,
         thought: Option<String>,
     },
-    #[allow(dead_code)]
     System(String),
     Typing,
 }
@@ -216,6 +198,7 @@ struct TuiState {
     emotion: String,
     activity: String,
     error: Option<String>,
+    show_debug: bool,
 }
 
 impl TuiState {
@@ -228,12 +211,12 @@ impl TuiState {
             emotion: "Casual".into(),
             activity: "Idle".into(),
             error: None,
+            show_debug: false,
         }
     }
 
     fn push_entry(&mut self, entry: ChatEntry) {
         self.entries.push_back(entry);
-        // Auto-scroll to bottom
         self.scroll_offset = self.entries.len();
     }
 
@@ -259,19 +242,19 @@ fn draw_ui(f: &mut Frame, state: &TuiState, config: &Config) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Status bar
-            Constraint::Min(1),   // Chat area
-            Constraint::Length(3), // Input box
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(3),
         ])
         .split(f.area());
 
     draw_status_bar(f, chunks[0], state, config);
     draw_chat_area(f, chunks[1], state, config);
-    draw_input_box(f, chunks[2], state, config);
+    draw_input_box(f, chunks[2], state);
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) {
-    let emotion_color = emotion_color(&state.emotion);
+    let ec = emotion_color(&state.emotion);
     let status_line = Line::from(vec![
         Span::styled(
             format!(" {} ", config.companion.name),
@@ -282,13 +265,11 @@ fn draw_status_bar(f: &mut Frame, area: Rect, state: &TuiState, config: &Config)
         Span::raw(" | "),
         Span::styled(
             format!("{} ", state.emotion),
-            Style::default()
-                .fg(emotion_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(ec).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
         Span::styled(
-            format!("{}", state.activity),
+            state.activity.to_string(),
             Style::default().fg(Color::Gray),
         ),
         Span::raw(" | "),
@@ -365,7 +346,6 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) 
         }
     }
 
-    // Error display
     if let Some(err) = &state.error {
         lines.push(Line::from(Span::styled(
             format!("  [error] {}", err),
@@ -385,20 +365,13 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &TuiState, config: &Config) 
     f.render_widget(chat, area);
 }
 
-fn draw_input_box(f: &mut Frame, area: Rect, state: &TuiState, _config: &Config) {
-    // Available width inside the box (accounting for borders)
-    let inner_width = area.width.saturating_sub(2) as usize; // 2 for borders
+fn draw_input_box(f: &mut Frame, area: Rect, state: &TuiState) {
+    let inner_width = area.width.saturating_sub(2) as usize;
     let prefix = "> ";
     let prefix_len = prefix.len();
-
-    // Scroll input if it's longer than available space
     let visible_width = inner_width.saturating_sub(prefix_len);
     let input_width = state.input.len();
-    let scroll = if input_width > visible_width {
-        input_width - visible_width
-    } else {
-        0
-    };
+    let scroll = input_width.saturating_sub(visible_width);
     let visible_input = if scroll > 0 {
         &state.input[scroll..]
     } else {
@@ -413,12 +386,11 @@ fn draw_input_box(f: &mut Frame, area: Rect, state: &TuiState, _config: &Config)
     let input = Paragraph::new(input_line).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Input (Enter=send, Ctrl+C=clear, Esc=quit) ")
+            .title(" Enter=send / /exit=quit / /new /db /debug ")
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(input, area);
 
-    // Cursor position: after prefix, at end of visible input
     let cursor_x = area.x + prefix_len as u16 + visible_input.len() as u16;
     let cursor_y = area.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
@@ -428,7 +400,6 @@ fn cmd_tui() -> Result<()> {
     let config = Config::load()?;
     let socket_path = std::path::PathBuf::from(&config.daemon.socket_path);
 
-    // Auto-start daemon if socket doesn't exist
     if !socket_path.exists() {
         println!("Daemon not running. Starting kanojod...");
         let kanojod_bin = std::env::current_exe()
@@ -460,11 +431,9 @@ fn cmd_tui() -> Result<()> {
                 socket_path.display()
             ));
         }
-        // Give daemon listener time to accept connections
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
-    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -478,7 +447,6 @@ fn cmd_tui() -> Result<()> {
         .enable_all()
         .build()?;
 
-    // Bidirectional daemon channel: send requests, receive responses
     let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let sock = socket_path.clone();
@@ -520,7 +488,6 @@ fn cmd_tui() -> Result<()> {
         }
     });
 
-    // Wait for connection
     let mut connected = false;
     for _ in 0..100 {
         if let Ok(msg) = resp_rx.try_recv() {
@@ -534,37 +501,83 @@ fn cmd_tui() -> Result<()> {
     if !connected {
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        return Err(anyhow::anyhow!("failed to connect to daemon at {}", socket_path.display()));
+        return Err(anyhow::anyhow!(
+            "failed to connect to daemon at {}",
+            socket_path.display()
+        ));
     }
 
     let mut msg_id: u64 = 1;
 
     loop {
-    terminal.draw(|f| draw_ui(f, &state, &config))?;
+        terminal.draw(|f| draw_ui(f, &state, &config))?;
 
-        // Handle terminal events
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
                 match key.code {
-                    KeyCode::Esc => break,
+                    KeyCode::Esc => {
+                        // Cancel: clear input or cancel waiting
+                        if state.is_waiting {
+                            state.is_waiting = false;
+                            state.entries.retain(|e| !matches!(e, ChatEntry::Typing));
+                        } else {
+                            state.input.clear();
+                        }
+                    }
                     KeyCode::Enter => {
                         let text = state.input.trim().to_string();
                         if text.is_empty() || state.is_waiting {
                             continue;
                         }
+
+                        // Handle slash commands locally
+                        match text.as_str() {
+                            "/exit" | "/quit" => break,
+                            "/new" => {
+                                state.entries.clear();
+                                state.error = None;
+                                state.scroll_offset = 0;
+                                state.push_entry(ChatEntry::System(
+                                    "Session cleared.".into(),
+                                ));
+                                state.input.clear();
+                                continue;
+                            }
+                            "/db" => {
+                                let req = kanojod_ipc::JsonRpcRequest::db_query(msg_id);
+                                if let Ok(json) = serde_json::to_string(&req) {
+                                    let _ = req_tx.send((msg_id, json));
+                                }
+                                msg_id += 1;
+                                state.input.clear();
+                                continue;
+                            }
+                            "/debug" => {
+                                let req = kanojod_ipc::JsonRpcRequest::debug_info(msg_id);
+                                if let Ok(json) = serde_json::to_string(&req) {
+                                    let _ = req_tx.send((msg_id, json));
+                                }
+                                msg_id += 1;
+                                state.input.clear();
+                                continue;
+                            }
+                            _ => {}
+                        }
+
                         state.push_entry(ChatEntry::User(text.clone()));
                         state.push_entry(ChatEntry::Typing);
                         state.is_waiting = true;
                         state.error = None;
+                        state.show_debug = false;
                         state.input.clear();
                         let _ = req_tx.send((msg_id, text));
                         msg_id += 1;
                     }
                     KeyCode::Char(c) => {
-                        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) && c == 'c' {
+                        if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                             state.input.clear();
                         } else {
                             state.input.push(c);
@@ -595,29 +608,84 @@ fn cmd_tui() -> Result<()> {
             }
         }
 
-        // Handle daemon responses
         while let Ok(msg) = resp_rx.try_recv() {
             if msg == "__connected__" || msg.starts_with("__error__") {
                 continue;
             }
-            // Remove typing indicator
             state.entries.retain(|e| !matches!(e, ChatEntry::Typing));
             state.is_waiting = false;
 
             if let Ok(resp) = serde_json::from_str::<kanojod_ipc::JsonRpcResponse>(&msg) {
                 if let Some(err) = resp.result["error"].as_str() {
                     state.error = Some(err.to_string());
+                } else if resp.result.get("messages").is_some() {
+                    // db_query response
+                    state.show_debug = false;
+                    state.push_entry(ChatEntry::System("=== Database State ===".into()));
+                    if let Some(_e) = resp.result["emotion"].as_str() {
+                        state.push_entry(ChatEntry::System(format!(
+                            "Emotion: {} | Activity: {} | Anger: {} | Affection: {} | Intimacy: {}",
+                            resp.result["emotion"],
+                            resp.result["activity"],
+                            resp.result["anger"],
+                            resp.result["affection"],
+                            resp.result["intimacy"],
+                        )));
+                    }
+                    if let Some(msgs) = resp.result["messages"].as_array() {
+                        for m in msgs.iter().rev().take(20) {
+                            let sender = m["sender"].as_str().unwrap_or("?");
+                            let dialogue = m["dialogue"].as_str().unwrap_or("?");
+                            state.push_entry(ChatEntry::System(format!(
+                                "[{}] {}: {}",
+                                m["channel"], sender, dialogue
+                            )));
+                        }
+                    }
+                } else if resp.result.get("llm_model").is_some() {
+                    // debug_info response
+                    state.show_debug = true;
+                    state.push_entry(ChatEntry::System(
+                        "=== DEBUG INFO (dev only) ===".into(),
+                    ));
+                    state.push_entry(ChatEntry::System(format!(
+                        "PID: {} | Socket: {}",
+                        resp.result["pid"], resp.result["socket_path"],
+                    )));
+                    state.push_entry(ChatEntry::System(format!(
+                        "Companion: {} | User: {}",
+                        resp.result["companion_name"], resp.result["user_name"],
+                    )));
+                    state.push_entry(ChatEntry::System(format!(
+                        "Emotion: {} | Activity: {} | Anger: {} | Affection: {} | Intimacy: {}",
+                        resp.result["emotion"],
+                        resp.result["activity"],
+                        resp.result["anger"],
+                        resp.result["affection"],
+                        resp.result["intimacy"],
+                    )));
+                    state.push_entry(ChatEntry::System(format!(
+                        "LLM: {} @ {} (temp={})",
+                        resp.result["llm_model"],
+                        resp.result["llm_base_url"],
+                        resp.result["llm_temperature"],
+                    )));
+                    state.push_entry(ChatEntry::System(format!(
+                        "DB: {}",
+                        resp.result["db_path"],
+                    )));
+                    state.push_entry(ChatEntry::System(format!(
+                        "Persona: {}",
+                        resp.result["persona"],
+                    )));
                 } else {
-                    let action = resp.result["action_text"]
-                        .as_str()
-                        .map(String::from);
+                    // send_message response
+                    let action = resp.result["action_text"].as_str().map(String::from);
                     let dialogue = resp.result["dialogue"]
                         .as_str()
                         .unwrap_or("...")
                         .to_string();
-                    let thought = resp.result["inner_thought"]
-                        .as_str()
-                        .map(String::from);
+                    let thought = resp.result["inner_thought"].as_str().map(String::from);
                     if let Some(e) = resp.result["emotion"].as_str() {
                         state.emotion = e.to_string();
                     }
@@ -631,7 +699,6 @@ fn cmd_tui() -> Result<()> {
         }
     }
 
-    // Cleanup
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())
