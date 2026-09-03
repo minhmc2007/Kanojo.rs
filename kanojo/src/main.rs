@@ -480,7 +480,7 @@ fn draw_input_box(f: &mut Frame, area: Rect, state: &TuiState) {
     f.render_widget(input, area);
 
     let cursor_visual = state.cursor_pos.saturating_sub(scroll);
-    let cursor_x = area.x + prefix_len as u16 + cursor_visual as u16;
+    let cursor_x = area.x + 1 + prefix_len as u16 + cursor_visual as u16;
     let cursor_y = area.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
 }
