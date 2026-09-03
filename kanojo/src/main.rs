@@ -19,7 +19,6 @@ enum Commands {
         action: Option<DaemonAction>,
     },
     Gateway,
-    Help,
 }
 
 #[derive(Subcommand)]
@@ -37,7 +36,6 @@ fn main() -> Result<()> {
         Some(Commands::Connect) => cmd_connect()?,
         Some(Commands::Daemon { action }) => cmd_daemon(action)?,
         Some(Commands::Gateway) => cmd_gateway()?,
-        Some(Commands::Help) => cmd_help(),
         None => cmd_tui()?,
     }
     Ok(())
@@ -175,19 +173,6 @@ fn cmd_gateway() -> Result<()> {
     config.save()?;
     println!("Telegram gateway configured.");
     Ok(())
-}
-
-fn cmd_help() {
-    println!(
-        "kanojo - Kanojo companion system\n\n\
-         COMMANDS:\n\
-         kanojo init       Configure user name, companion name, persona\n\
-         kanojo connect    Configure LLM provider\n\
-         kanojo daemon     Start/stop/status the daemon\n\
-         kanojo gateway    Configure Telegram bot\n\
-         kanojo help       Show this help\n\
-         kanojo            Launch TUI (default)"
-    );
 }
 
 fn cmd_tui() -> Result<()> {
