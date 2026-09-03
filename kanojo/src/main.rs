@@ -415,7 +415,10 @@ fn cmd_tui() -> Result<()> {
             .and_then(|p| p.parent().map(|d| d.join("kanojod")))
             .filter(|p| p.exists())
             .unwrap_or_else(|| "kanojod".into());
+        let devnull = std::fs::File::open(std::path::Path::new("/dev/null"))?;
         std::process::Command::new(&kanojod_bin)
+            .stdout(devnull.try_clone()?)
+            .stderr(devnull)
             .spawn()
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -436,6 +439,8 @@ fn cmd_tui() -> Result<()> {
                 socket_path.display()
             ));
         }
+        // Give daemon listener time to accept connections
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
     // Setup terminal
@@ -447,17 +452,21 @@ fn cmd_tui() -> Result<()> {
 
     let mut state = TuiState::new();
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
 
     // Bidirectional daemon channel: send requests, receive responses
     let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let sock = socket_path.clone();
 
     rt.spawn(async move {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixStream;
 
-        let stream = match UnixStream::connect(&socket_path).await {
+        let stream = match UnixStream::connect(&sock).await {
             Ok(s) => s,
             Err(e) => {
                 let _ = resp_tx.send(format!("__error__:{}", e));
@@ -492,19 +501,19 @@ fn cmd_tui() -> Result<()> {
 
     // Wait for connection
     let mut connected = false;
-    for _ in 0..50 {
+    for _ in 0..100 {
         if let Ok(msg) = resp_rx.try_recv() {
             if msg == "__connected__" {
                 connected = true;
                 break;
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     if !connected {
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        return Err(anyhow::anyhow!("failed to connect to daemon"));
+        return Err(anyhow::anyhow!("failed to connect to daemon at {}", socket_path.display()));
     }
 
     let mut msg_id: u64 = 1;
