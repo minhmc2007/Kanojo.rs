@@ -146,8 +146,10 @@ impl Daemon {
              - Your emotion affects how you respond. If angry, be short/cold. If affectionate, be warm.\n\
              - Keep replies short and natural, like a real text conversation.\n\
              - You can include action text like *shifts in seat* or *looks up from phone*\n\
-             - Respond with JSON: {{\"action_text\": \"...\", \"dialogue\": \"...\", \"inner_thought\": \"...\"}}\n\
-             - action_text and inner_thought can be null.\n\n\
+             - Respond with JSON: {{\"action_text\": \"...\", \"dialogue\": \"...\", \"inner_thought\": \"...\", \"activity\": \"...\"}}\n\
+             - action_text and inner_thought can be null.\n\
+             - activity is what you are currently doing (e.g. \"Studying\", \"Cooking\", \"Gaming\", \"Idle\").\n\
+             - Only change activity if it genuinely shifts based on the conversation.\n\n\
              RECENT CONVERSATION:\n{history}"
         )
     }
@@ -175,6 +177,15 @@ impl Daemon {
             .to_string();
         let action_text = parsed["action_text"].as_str().map(String::from);
         let inner_thought = parsed["inner_thought"].as_str().map(String::from);
+        let new_activity = parsed["activity"].as_str().map(String::from);
+
+        // Update activity if LLM reported a change
+        if let Some(ref act) = new_activity {
+            if !act.is_empty() {
+                let db = self.db.lock().await;
+                db.set_activity(act)?;
+            }
+        }
 
         let activity = {
             let db = self.db.lock().await;
