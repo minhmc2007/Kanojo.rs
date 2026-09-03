@@ -1,56 +1,209 @@
 use anyhow::Result;
 use kanojod_db::Database;
-use kanojod_ipc::{GatewaySource, IpcEnvelope, IpcRequest};
-use std::path::PathBuf;
+use kanojod_ipc::{CompanionReply, JsonRpcRequest, JsonRpcResponse, SendMessageParams};
+use kanojo_config::Config;
+use kanojo_typo::TypoEngine;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
-struct Daemon {
-    db: Arc<Mutex<Database>>,
+struct LlmClient {
+    http: Client,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+    temperature: f32,
+    max_tokens: u32,
 }
 
-impl Daemon {
-    fn new(db: Database) -> Self {
+#[derive(Serialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: f32,
+    max_tokens: u32,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatResponseMsg,
+}
+
+#[derive(Deserialize)]
+struct ChatResponseMsg {
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatChoice>,
+}
+
+impl LlmClient {
+    fn from_config(cfg: &Config) -> Self {
         Self {
-            db: Arc::new(Mutex::new(db)),
+            http: Client::new(),
+            base_url: cfg.llm.base_url.clone(),
+            model: cfg.llm.model.clone(),
+            api_key: cfg.llm.api_key.clone(),
+            temperature: cfg.llm.temperature,
+            max_tokens: cfg.llm.max_tokens,
         }
     }
 
-    async fn handle_request(&self, req: IpcRequest) -> Result<Option<String>> {
-        let db = self.db.lock().await;
-        match req {
-            IpcRequest::SendUserMessage { source, text } => {
-                let channel = match &source {
-                    GatewaySource::Cli => "cli",
-                    GatewaySource::Telegram { .. } => "telegram",
-                    GatewaySource::DesktopNotification => "daemon",
-                };
-                db.insert_message("user", channel, &text, None, None)?;
-                let emotion = db.process_incoming_message(&text)?;
-                let reply = format!("(emotion: {}) echoing: {}", emotion, text);
-                db.insert_message("companion", "daemon", &reply, None, None)?;
-                Ok(Some(reply))
-            }
-            IpcRequest::FetchState => {
-                let emotion = db.get_emotion()?;
-                let activity = db.get_activity()?;
-                let anger = db.get_anger()?;
-                let affection = db.get_affection()?;
-                Ok(Some(format!(
-                    "emotion={} activity={} anger={} affection={}",
-                    emotion, activity, anger, affection
-                )))
-            }
-            IpcRequest::SetAfk { reason } => {
-                db.set_activity("AFK")?;
-                if let Some(r) = &reason {
-                    db.insert_message("system", "daemon", r, None, None)?;
-                }
-                Ok(Some("afk set".into()))
-            }
+    async fn chat(&self, system: &str, user_msg: &str) -> Result<String> {
+        let body = ChatRequest {
+            model: self.model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: system.into(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: user_msg.into(),
+                },
+            ],
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+        };
+
+        let mut req = self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .json(&body);
+
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
         }
+
+        let resp = req.send().await?.json::<ChatResponse>().await?;
+        Ok(resp
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .unwrap_or_default())
+    }
+}
+
+struct Daemon {
+    db: Arc<Mutex<Database>>,
+    llm: LlmClient,
+    config: Config,
+}
+
+impl Daemon {
+    fn new(db: Database, config: Config) -> Self {
+        let llm = LlmClient::from_config(&config);
+        Self {
+            db: Arc::new(Mutex::new(db)),
+            llm,
+            config,
+        }
+    }
+
+    async fn build_system_prompt(&self) -> String {
+        let db = self.db.lock().await;
+        let emotion = db.get_emotion().unwrap_or_else(|_| "Casual".into());
+        let activity = db.get_activity().unwrap_or_else(|_| "Idle".into());
+        let anger = db.get_anger().unwrap_or(0);
+        let affection = db.get_affection().unwrap_or(50);
+        let intimacy = db.get_intimacy().unwrap_or(0);
+
+        let recent = db.recent_messages(10).unwrap_or_default();
+        let history: String = recent
+            .iter()
+            .rev()
+            .map(|(sender, _channel, dialogue)| format!("{}: {}", sender, dialogue))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let companion_name = &self.config.companion.name;
+        let user_name = &self.config.user.name;
+        let persona = &self.config.companion.persona;
+
+        format!(
+            "You are {companion_name}, a virtual companion. {persona}\n\
+             User is {user_name}.\n\n\
+             CURRENT STATE:\n\
+             - Emotion: {emotion}\n\
+             - Activity: {activity}\n\
+             - Anger: {anger}/100\n\
+             - Affection: {affection}/100\n\
+             - Intimacy: {intimacy}/100\n\n\
+             RULES:\n\
+             - Stay in character as {companion_name}.\n\
+             - Your emotion affects how you respond. If angry, be short/cold. If affectionate, be warm.\n\
+             - Keep replies short and natural, like a real text conversation.\n\
+             - You can include action text like *shifts in seat* or *looks up from phone*\n\
+             - Respond with JSON: {{\"action_text\": \"...\", \"dialogue\": \"...\", \"inner_thought\": \"...\"}}\n\
+             - action_text and inner_thought can be null.\n\n\
+             RECENT CONVERSATION:\n{history}"
+        )
+    }
+
+    async fn handle_send_message(&self, channel: &str, text: &str) -> Result<CompanionReply> {
+        let emotion = {
+            let db = self.db.lock().await;
+            db.insert_message("user", channel, text, None, None)?;
+            db.process_incoming_message(text)?
+        };
+
+        let system_prompt = self.build_system_prompt().await;
+        let raw_reply = self.llm.chat(&system_prompt, text).await?;
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw_reply).unwrap_or(serde_json::json!({
+                "dialogue": raw_reply.trim().trim_matches('"'),
+                "action_text": null,
+                "inner_thought": null,
+            }));
+
+        let dialogue = parsed["dialogue"]
+            .as_str()
+            .unwrap_or("...")
+            .to_string();
+        let action_text = parsed["action_text"].as_str().map(String::from);
+        let inner_thought = parsed["inner_thought"].as_str().map(String::from);
+
+        let activity = {
+            let db = self.db.lock().await;
+            db.get_activity().unwrap_or_else(|_| "Idle".into())
+        };
+        let typo_rate = TypoEngine::rate_for_activity(&activity);
+        let final_dialogue = TypoEngine::inject_typos(&dialogue, typo_rate);
+
+        let typing_delay = 950 + (dialogue.len() as u64 * 30);
+
+        {
+            let db = self.db.lock().await;
+            db.insert_message(
+                "companion",
+                channel,
+                &final_dialogue,
+                action_text.as_deref(),
+                inner_thought.as_deref(),
+            )?;
+            db.update_last_bot_message()?;
+        }
+
+        Ok(CompanionReply {
+            action_text,
+            dialogue: final_dialogue,
+            inner_thought,
+            emotion,
+            typing_delay_ms: typing_delay,
+        })
     }
 }
 
@@ -58,20 +211,21 @@ impl Daemon {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let db_path = db_path();
-    if let Some(parent) = db_path.parent() {
+    let config = Config::load()?;
+    let db_path = &config.daemon.db_path;
+    if let Some(parent) = std::path::Path::new(db_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let db = Database::open(db_path.to_str().unwrap())?;
+    let db = Database::open(db_path)?;
     db.init_schema()?;
 
-    let sock_path = socket_path();
+    let sock_path = std::path::PathBuf::from(&config.daemon.socket_path);
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(&sock_path);
 
-    let daemon = Daemon::new(Database::open(db_path.to_str().unwrap())?);
+    let daemon = Daemon::new(Database::open(db_path)?, config);
 
     let listener = UnixListener::bind(&sock_path)?;
     tracing::info!("kanojod listening on {}", sock_path.display());
@@ -80,6 +234,15 @@ async fn main() -> Result<()> {
         let (stream, _addr) = listener.accept().await?;
         let daemon = Daemon {
             db: Arc::clone(&daemon.db),
+            llm: LlmClient {
+                http: Client::new(),
+                base_url: daemon.llm.base_url.clone(),
+                model: daemon.llm.model.clone(),
+                api_key: daemon.llm.api_key.clone(),
+                temperature: daemon.llm.temperature,
+                max_tokens: daemon.llm.max_tokens,
+            },
+            config: daemon.config.clone(),
         };
 
         tokio::spawn(async move {
@@ -87,20 +250,36 @@ async fn main() -> Result<()> {
             let mut lines = BufReader::new(reader).lines();
 
             while let Some(line) = lines.next_line().await.ok().flatten() {
-                let response = match serde_json::from_str::<IpcEnvelope<IpcRequest>>(&line) {
-                    Ok(envelope) => {
-                        let result = daemon.handle_request(envelope.payload).await;
-                        let payload = result.unwrap_or(None).unwrap_or_default();
-                        IpcEnvelope::new(envelope.id, payload)
+                let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
+                    Ok(req) => {
+                        let result = match req.method.as_str() {
+                            "send_message" => {
+                                let params: SendMessageParams =
+                                    serde_json::from_value(req.params).unwrap();
+                                match daemon.handle_send_message(&params.channel, &params.text).await
+                                {
+                                    Ok(reply) => serde_json::to_value(reply).unwrap(),
+                                    Err(e) => {
+                                        tracing::error!("handle_send_message: {}", e);
+                                        serde_json::json!({"error": e.to_string()})
+                                    }
+                                }
+                            }
+                            "fetch_state" => {
+                                let db = daemon.db.lock().await;
+                                serde_json::json!({
+                                    "emotion": db.get_emotion().unwrap_or_default(),
+                                    "activity": db.get_activity().unwrap_or_default(),
+                                    "anger": db.get_anger().unwrap_or(0),
+                                    "affection": db.get_affection().unwrap_or(0),
+                                })
+                            }
+                            _ => serde_json::json!({"error": "unknown method"}),
+                        };
+                        JsonRpcResponse::new(req.id, result)
                     }
                     Err(_) => {
-                        let req = IpcRequest::SendUserMessage {
-                            source: GatewaySource::Cli,
-                            text: line.clone(),
-                        };
-                        let result = daemon.handle_request(req).await;
-                        let payload = result.unwrap_or(None).unwrap_or_default();
-                        IpcEnvelope::new(0, payload)
+                        JsonRpcResponse::new(0, serde_json::json!({"error": "invalid jsonrpc"}))
                     }
                 };
                 let json = serde_json::to_string(&response).unwrap_or_default();
@@ -109,22 +288,4 @@ async fn main() -> Result<()> {
             }
         });
     }
-}
-
-fn socket_path() -> PathBuf {
-    PathBuf::from("/tmp/kanojo.sock")
-}
-
-fn db_path() -> PathBuf {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .map(|d| d.join("kanojo/kanojo.db"))
-        .unwrap_or_else(|| {
-            PathBuf::from(
-                std::env::var("HOME")
-                    .unwrap_or_else(|_| ".".into()),
-            )
-            .join(".local/share/kanojo/kanojo.db")
-        })
 }

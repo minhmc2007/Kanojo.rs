@@ -1,5 +1,5 @@
 [workspace]
-members = ["kanojod", "kanojo-cli", "kanojo-typo", "kanojod-db", "kanojod-ipc"]
+members = ["kanojod", "kanojo", "kanojo-typo", "kanojod-db", "kanojod-ipc", "kanojo-config"]
 resolver = "2"
 
 [workspace.package]
