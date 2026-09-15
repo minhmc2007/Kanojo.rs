@@ -98,7 +98,7 @@ impl LlmClient {
         let resp = req.send().await?;
         tracing::debug!("LLM response status: {}", resp.status());
         let text = resp.text().await?;
-        tracing::debug!("LLM raw response (first 300): {}", &text[..text.len().min(300)]);
+        tracing::debug!("LLM raw response (first 300): {}", text.chars().take(300).collect::<String>());
         let resp: ChatResponse = serde_json::from_str(&text)?;
         tracing::debug!("LLM parsed, {} choices", resp.choices.len());
         Ok(resp
