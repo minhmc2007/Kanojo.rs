@@ -104,6 +104,59 @@ fn prompt_with_default(label: &str, current: &str) -> Result<String> {
     })
 }
 
+async fn fetch_models(base_url: &str, api_key: &Option<String>) -> Option<Vec<String>> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let mut req = client.get(&url);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await.ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let models = body["data"].as_array()?;
+    let ids: Vec<String> = models
+        .iter()
+        .filter_map(|m| m.get("id")?.as_str().map(String::from))
+        .collect();
+    if ids.is_empty() { None } else { Some(ids) }
+}
+
+fn prompt_model_selection(models: &[String], current: &str) -> Result<String> {
+    println!("\nAvailable models:");
+    for (i, model) in models.iter().enumerate() {
+        println!("  {}. {}", i + 1, model);
+    }
+    println!("  0. Enter manually");
+
+    let default_idx = models.iter().position(|m| m == current).map(|i| i + 1).unwrap_or(0);
+
+    loop {
+        print!("Pick model [{}]: ", if default_idx > 0 { default_idx.to_string() } else { "0".into() });
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim();
+
+        let choice: usize = if trimmed.is_empty() {
+            default_idx
+        } else {
+            trimmed.parse().unwrap_or(0)
+        };
+
+        if choice == 0 {
+            let val = prompt_with_default("Model name", current)?;
+            return Ok(val);
+        }
+        if choice > 0 && choice <= models.len() {
+            return Ok(models[choice - 1].clone());
+        }
+        println!("Invalid choice. Try again.");
+    }
+}
+
 fn cmd_init() -> Result<()> {
     let mut config = Config::load().unwrap_or_default();
 
@@ -125,8 +178,27 @@ fn cmd_init() -> Result<()> {
     println!("\n--- Step 3: LLM ---");
     let val = prompt_with_default("Base URL", &config.llm.base_url)?;
     config.llm.base_url = val;
-    let val = prompt_with_default("Model (leave empty to auto-detect)", &config.llm.model)?;
+
+    let api_key = config.llm.api_key.clone();
+    let models = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(fetch_models(&config.llm.base_url, &api_key));
+
+    let val = match models {
+        Some(ref m) if m.len() > 1 => {
+            prompt_model_selection(m, &config.llm.model)?
+        }
+        Some(ref m) if m.len() == 1 => {
+            println!("Detected model: {}", m[0]);
+            m[0].clone()
+        }
+        _ => {
+            prompt_with_default("Model", &config.llm.model)?
+        }
+    };
     config.llm.model = val;
+
     let current_key = config.llm.api_key.as_deref().unwrap_or("");
     let val = prompt_with_default("API key (optional)", current_key)?;
     config.llm.api_key = if val.is_empty() { None } else { Some(val) };
@@ -170,10 +242,27 @@ fn cmd_connect() -> Result<()> {
     let mut new_config = config.clone();
     new_config.llm.base_url = val;
 
-    let val = prompt_with_default("Model", &config.llm.model)?;
+    let api_key = new_config.llm.api_key.clone();
+    let models = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(fetch_models(&new_config.llm.base_url, &api_key));
+
+    let val = match models {
+        Some(ref m) if m.len() > 1 => {
+            prompt_model_selection(m, &new_config.llm.model)?
+        }
+        Some(ref m) if m.len() == 1 => {
+            println!("Detected model: {}", m[0]);
+            m[0].clone()
+        }
+        _ => {
+            prompt_with_default("Model", &new_config.llm.model)?
+        }
+    };
     new_config.llm.model = val;
 
-    let current_key = config.llm.api_key.as_deref().unwrap_or("");
+    let current_key = new_config.llm.api_key.as_deref().unwrap_or("");
     let val = prompt_with_default("API key (optional)", current_key)?;
     new_config.llm.api_key = if val.is_empty() { None } else { Some(val) };
 
