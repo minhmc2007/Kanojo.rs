@@ -21,7 +21,7 @@ struct LlmClient {
     max_tokens: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ChatMessage {
     role: String,
     content: String,
@@ -81,19 +81,10 @@ impl LlmClient {
             .map(String::from)
     }
 
-    async fn chat(&self, system: &str, user_msg: &str) -> Result<String> {
+    async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
         let body = ChatRequest {
             model: self.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: "system".into(),
-                    content: system.into(),
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: user_msg.into(),
-                },
-            ],
+            messages,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
         };
@@ -114,8 +105,14 @@ impl LlmClient {
         let resp = req.send().await?;
         tracing::debug!("LLM response status: {}", resp.status());
         let text = resp.text().await?;
-        tracing::debug!("LLM raw response (first 300): {}", text.chars().take(300).collect::<String>());
-        let resp: ChatResponse = serde_json::from_str(&text)?;
+        tracing::debug!("LLM raw response (first 500): {}", text.chars().take(500).collect::<String>());
+        let resp: ChatResponse = match serde_json::from_str(&text) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to parse LLM response: {}\nRaw: {}", e, text.chars().take(1000).collect::<String>());
+                return Err(e.into());
+            }
+        };
         tracing::debug!("LLM parsed, {} choices", resp.choices.len());
         Ok(resp
             .choices
@@ -263,14 +260,6 @@ impl Daemon {
         let affection = db.get_affection().unwrap_or(50);
         let intimacy = db.get_intimacy().unwrap_or(0);
 
-        let recent = db.recent_messages(10).unwrap_or_default();
-        let history: String = recent
-            .iter()
-            .rev()
-            .map(|(sender, _channel, dialogue)| format!("{}: {}", sender, dialogue))
-            .collect::<Vec<_>>()
-            .join("\n");
-
         let companion_name = &self.config.companion.name;
         let user_name = &self.config.user.name;
         let persona = &self.config.companion.persona;
@@ -306,8 +295,7 @@ impl Daemon {
              Stay in character as {companion_name}. Your emotion shapes your tone.\n\
              If angry: short, cold. If affectionate: warm and gentle.\n\
              Keep replies short and natural.\n\
-             /no_think\n\n\
-             RECENT CONVERSATION:\n{history}"
+             /no_think"
         )
     }
 
@@ -320,7 +308,29 @@ impl Daemon {
         };
 
         let system_prompt = self.build_system_prompt().await;
-        let raw_reply = self.llm.chat(&system_prompt, text).await?;
+
+        let history = {
+            let db = self.db.lock().await;
+            db.recent_messages(10).unwrap_or_default()
+        };
+        let mut messages: Vec<ChatMessage> = Vec::new();
+        messages.push(ChatMessage {
+            role: "system".into(),
+            content: system_prompt,
+        });
+        for (sender, _channel, dialogue) in history.iter().rev() {
+            let role = if sender == "user" { "user" } else { "assistant" };
+            messages.push(ChatMessage {
+                role: role.into(),
+                content: dialogue.clone(),
+            });
+        }
+        messages.push(ChatMessage {
+            role: "user".into(),
+            content: text.to_string(),
+        });
+
+        let raw_reply = self.llm.chat(messages.clone()).await?;
 
         let parsed = match parse_llm_json(&raw_reply) {
             Some(v) => v,
@@ -333,7 +343,13 @@ impl Daemon {
                      Your broken response was:\n{}",
                     raw_reply
                 );
-                let retry_reply = self.llm.chat(&correction, text).await?;
+                let mut retry_messages = messages;
+                retry_messages.pop(); // remove last user msg
+                retry_messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: correction,
+                });
+                let retry_reply = self.llm.chat(retry_messages).await?;
                 parse_llm_json(&retry_reply).unwrap_or_else(|| {
                     serde_json::json!({
                         "dialogue": "...",
