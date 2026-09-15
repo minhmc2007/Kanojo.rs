@@ -256,7 +256,13 @@ async fn main() -> Result<()> {
     tracing::info!("kanojod listening on {}", sock_path.display());
 
     loop {
-        let (stream, _addr) = listener.accept().await?;
+        let (stream, _addr) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("accept error: {}", e);
+                continue;
+            }
+        };
         let daemon = Daemon {
             db: Arc::clone(&daemon.db),
             llm: LlmClient {
