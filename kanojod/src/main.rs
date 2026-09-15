@@ -257,116 +257,127 @@ async fn main() -> Result<()> {
     tracing::info!("kanojod listening on {}", sock_path.display());
 
     loop {
-        let (stream, _addr) = match listener.accept().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("accept error: {}", e);
-                continue;
-            }
-        };
-        let daemon = Daemon {
-            db: Arc::clone(&daemon.db),
-            llm: daemon.llm.clone(),
-            config: daemon.config.clone(),
-        };
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, _addr) = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("accept error: {}", e);
+                        continue;
+                    }
+                };
+                let daemon = Daemon {
+                    db: Arc::clone(&daemon.db),
+                    llm: daemon.llm.clone(),
+                    config: daemon.config.clone(),
+                };
 
-        tokio::spawn(async move {
-            let (reader, mut writer) = stream.into_split();
-            let mut lines = BufReader::new(reader).lines();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut lines = BufReader::new(reader).lines();
 
-            while let Some(line) = lines.next_line().await.ok().flatten() {
-                let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-                    Ok(req) => {
-                        let result = match req.method.as_str() {
-                            "send_message" => {
-                                match serde_json::from_value::<SendMessageParams>(req.params) {
-                                    Ok(params) => {
-                                        match daemon.handle_send_message(&params.channel, &params.text).await
-                                        {
-                                            Ok(reply) => serde_json::to_value(reply).unwrap(),
+                    while let Some(line) = lines.next_line().await.ok().flatten() {
+                        let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
+                            Ok(req) => {
+                                let result = match req.method.as_str() {
+                                    "send_message" => {
+                                        match serde_json::from_value::<SendMessageParams>(req.params) {
+                                            Ok(params) => {
+                                                match daemon.handle_send_message(&params.channel, &params.text).await
+                                                {
+                                                    Ok(reply) => serde_json::to_value(reply).unwrap(),
+                                                    Err(e) => {
+                                                        tracing::error!("handle_send_message: {}", e);
+                                                        serde_json::json!({"error": e.to_string()})
+                                                    }
+                                                }
+                                            }
                                             Err(e) => {
-                                                tracing::error!("handle_send_message: {}", e);
-                                                serde_json::json!({"error": e.to_string()})
+                                                tracing::error!("invalid send_message params: {}", e);
+                                                serde_json::json!({"error": format!("invalid params: {}", e)})
                                             }
                                         }
                                     }
-                                    Err(e) => {
-                                        tracing::error!("invalid send_message params: {}", e);
-                                        serde_json::json!({"error": format!("invalid params: {}", e)})
-                                    }
-                                }
-                            }
-                            "fetch_state" => {
-                                let db = daemon.db.lock().await;
-                                serde_json::json!({
-                                    "emotion": db.get_emotion().unwrap_or_default(),
-                                    "activity": db.get_activity().unwrap_or_default(),
-                                    "anger": db.get_anger().unwrap_or(0),
-                                    "affection": db.get_affection().unwrap_or(0),
-                                })
-                            }
-                            "db_query" => {
-                                let db = daemon.db.lock().await;
-                                let messages = db.recent_messages(50).unwrap_or_default();
-                                let history: Vec<serde_json::Value> = messages
-                                    .iter()
-                                    .map(|(sender, channel, dialogue)| {
+                                    "fetch_state" => {
+                                        let db = daemon.db.lock().await;
                                         serde_json::json!({
-                                            "sender": sender,
-                                            "channel": channel,
-                                            "dialogue": dialogue,
+                                            "emotion": db.get_emotion().unwrap_or_default(),
+                                            "activity": db.get_activity().unwrap_or_default(),
+                                            "anger": db.get_anger().unwrap_or(0),
+                                            "affection": db.get_affection().unwrap_or(0),
                                         })
-                                    })
-                                    .collect();
-                                serde_json::json!({
-                                    "emotion": db.get_emotion().unwrap_or_default(),
-                                    "activity": db.get_activity().unwrap_or_default(),
-                                    "anger": db.get_anger().unwrap_or(0),
-                                    "affection": db.get_affection().unwrap_or(0),
-                                    "intimacy": db.get_intimacy().unwrap_or(0),
-                                    "messages": history,
-                                })
+                                    }
+                                    "db_query" => {
+                                        let db = daemon.db.lock().await;
+                                        let messages = db.recent_messages(50).unwrap_or_default();
+                                        let history: Vec<serde_json::Value> = messages
+                                            .iter()
+                                            .map(|(sender, channel, dialogue)| {
+                                                serde_json::json!({
+                                                    "sender": sender,
+                                                    "channel": channel,
+                                                    "dialogue": dialogue,
+                                                })
+                                            })
+                                            .collect();
+                                        serde_json::json!({
+                                            "emotion": db.get_emotion().unwrap_or_default(),
+                                            "activity": db.get_activity().unwrap_or_default(),
+                                            "anger": db.get_anger().unwrap_or(0),
+                                            "affection": db.get_affection().unwrap_or(0),
+                                            "intimacy": db.get_intimacy().unwrap_or(0),
+                                            "messages": history,
+                                        })
+                                    }
+                                    "debug_info" => {
+                                        let db = daemon.db.lock().await;
+                                        let process_check = std::process::Command::new("pgrep")
+                                            .arg("-x")
+                                            .arg("kanojod")
+                                            .output();
+                                        let pid = process_check
+                                            .ok()
+                                            .and_then(|o| String::from_utf8(o.stdout).ok())
+                                            .map(|s| s.trim().to_string())
+                                            .unwrap_or_else(|| "not found".into());
+                                        serde_json::json!({
+                                            "pid": pid,
+                                            "emotion": db.get_emotion().unwrap_or_default(),
+                                            "activity": db.get_activity().unwrap_or_default(),
+                                            "anger": db.get_anger().unwrap_or(0),
+                                            "affection": db.get_affection().unwrap_or(0),
+                                            "intimacy": db.get_intimacy().unwrap_or(0),
+                                            "llm_model": daemon.config.llm.model,
+                                            "llm_base_url": daemon.config.llm.base_url,
+                                            "llm_temperature": daemon.config.llm.temperature,
+                                            "socket_path": daemon.config.daemon.socket_path,
+                                            "db_path": daemon.config.daemon.db_path,
+                                            "companion_name": daemon.config.companion.name,
+                                            "user_name": daemon.config.user.name,
+                                            "persona": daemon.config.companion.persona,
+                                        })
+                                    }
+                                    _ => serde_json::json!({"error": "unknown method"}),
+                                };
+                                JsonRpcResponse::new(req.id, result)
                             }
-                            "debug_info" => {
-                                let db = daemon.db.lock().await;
-                                let process_check = std::process::Command::new("pgrep")
-                                    .arg("-x")
-                                    .arg("kanojod")
-                                    .output();
-                                let pid = process_check
-                                    .ok()
-                                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                                    .map(|s| s.trim().to_string())
-                                    .unwrap_or_else(|| "not found".into());
-                                serde_json::json!({
-                                    "pid": pid,
-                                    "emotion": db.get_emotion().unwrap_or_default(),
-                                    "activity": db.get_activity().unwrap_or_default(),
-                                    "anger": db.get_anger().unwrap_or(0),
-                                    "affection": db.get_affection().unwrap_or(0),
-                                    "intimacy": db.get_intimacy().unwrap_or(0),
-                                    "llm_model": daemon.config.llm.model,
-                                    "llm_base_url": daemon.config.llm.base_url,
-                                    "llm_temperature": daemon.config.llm.temperature,
-                                    "socket_path": daemon.config.daemon.socket_path,
-                                    "db_path": daemon.config.daemon.db_path,
-                                    "companion_name": daemon.config.companion.name,
-                                    "user_name": daemon.config.user.name,
-                                    "persona": daemon.config.companion.persona,
-                                })
+                            Err(_) => {
+                                JsonRpcResponse::new(0, serde_json::json!({"error": "invalid jsonrpc"}))
                             }
-                            _ => serde_json::json!({"error": "unknown method"}),
                         };
-                        JsonRpcResponse::new(req.id, result)
+                        let json = serde_json::to_string(&response).unwrap_or_default();
+                        let _ = writer.write_all(json.as_bytes()).await;
+                        let _ = writer.write_all(b"\n").await;
                     }
-                    Err(_) => {
-                        JsonRpcResponse::new(0, serde_json::json!({"error": "invalid jsonrpc"}))
-                    }
-                };
-                let json = serde_json::to_string(&response).unwrap_or_default();
-                let _ = writer.write_all(json.as_bytes()).await;
-                let _ = writer.write_all(b"\n").await;
+                });
             }
-        });
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutting down");
+                let _ = std::fs::remove_file(&sock_path);
+                break;
+            }
+        }
     }
+
+    Ok(())
 }
