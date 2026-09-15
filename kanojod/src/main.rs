@@ -159,11 +159,11 @@ fn extract_field(s: &str, key: &str) -> Option<String> {
         return Some(val_start[1..].trim().trim_matches('*').to_string());
     }
 
-    // Unquoted value — find end at comma or closing brace
+    // Unquoted value — find end at comma, closing brace, or stray quote
     let bytes = val_start.as_bytes();
     let mut end = bytes.len();
     for (i, &b) in bytes.iter().enumerate() {
-        if b == b',' || b == b'}' {
+        if b == b',' || b == b'}' || b == b'"' {
             end = i;
             break;
         }
@@ -301,11 +301,6 @@ impl Daemon {
 
     async fn handle_send_message(&self, channel: &str, text: &str) -> Result<CompanionReply> {
         tracing::debug!("handle_send_message: channel={} text={}", channel, text);
-        let emotion = {
-            let db = self.db.lock().await;
-            db.insert_message("user", channel, text, None, None)?;
-            db.process_incoming_message(text)?
-        };
 
         let system_prompt = self.build_system_prompt().await;
 
@@ -329,6 +324,12 @@ impl Daemon {
             role: "user".into(),
             content: text.to_string(),
         });
+
+        let emotion = {
+            let db = self.db.lock().await;
+            db.insert_message("user", channel, text, None, None)?;
+            db.process_incoming_message(text)?
+        };
 
         let raw_reply = self.llm.chat(messages.clone()).await?;
 
