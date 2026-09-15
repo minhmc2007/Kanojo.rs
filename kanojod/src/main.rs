@@ -171,16 +171,21 @@ impl Daemon {
              - Anger: {anger}/100\n\
              - Affection: {affection}/100\n\
              - Intimacy: {intimacy}/100\n\n\
-             RULES:\n\
-             - Stay in character as {companion_name}.\n\
-             - Your emotion affects how you respond. If angry, be short/cold. If affectionate, be warm.\n\
+             Respond with ONLY a JSON object. No markdown, no code fences, no text before or after.\n\n\
+             Example:\n\
+             {{\"dialogue\": \"hello\", \"action_text\": \"waves\", \"inner_thought\": null, \"activity\": \"Idle\"}}\n\n\
+             Fields:\n\
+             - dialogue: your spoken words (string)\n\
+             - action_text: one physical action or null (string|null)\n\
+             - inner_thought: private thought or null (string|null)\n\
+             - activity: one of Studying, Cooking, Gaming, Reading, Idle, Walking, Eating\n\n\
+             Rules:\n\
+             - Stay in character as {companion_name}. Your emotion shapes your tone.\n\
+             - If angry: short, cold replies. If affectionate: warm and gentle.\n\
              - Keep replies short and natural, like a real text conversation.\n\
-             - You can include action text like *shifts in seat* or *looks up from phone*\n\
-             - ALWAYS respond with ONLY valid JSON, no markdown, no code fences:\n\
-             {{\"action_text\": \"...\", \"dialogue\": \"...\", \"inner_thought\": \"...\", \"activity\": \"...\"}}\n\
-             - action_text and inner_thought can be null.\n\
-             - activity MUST be set to what you are currently doing. Examples: \"Studying\", \"Cooking\", \"Gaming\", \"Reading\", \"Idle\", \"Walking\", \"Eating\".\n\
-             - Update activity only when it genuinely changes.\n\n\
+             - dialogue contains ONLY what you say aloud. No asterisks, no metadata.\n\
+             - Do NOT include emotion numbers, activity stats, or any metadata in your response.\n\
+             - Do NOT output reasoning or thinking process. ONLY the JSON object.\n\n\
              RECENT CONVERSATION:\n{history}"
         )
     }
@@ -196,8 +201,15 @@ impl Daemon {
         let system_prompt = self.build_system_prompt().await;
         let raw_reply = self.llm.chat(&system_prompt, text).await?;
 
+        let trimmed = raw_reply.trim().to_string();
+        let json_str = if trimmed.starts_with('{') && !trimmed.ends_with('}') {
+            format!("{}}}", trimmed)
+        } else {
+            trimmed
+        };
+
         let parsed: serde_json::Value =
-            serde_json::from_str(&raw_reply).unwrap_or(serde_json::json!({
+            serde_json::from_str(&json_str).unwrap_or(serde_json::json!({
                 "dialogue": raw_reply.trim().trim_matches('"'),
                 "action_text": null,
                 "inner_thought": null,
