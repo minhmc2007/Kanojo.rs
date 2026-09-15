@@ -5,6 +5,7 @@ use std::io::{self, Write};
 
 #[derive(Parser)]
 #[command(name = "kanojo", about = "Kanojo companion system")]
+#[command(long_about = "A virtual companion chat system with local LLM support.\n\nQuick start:\n  kanojo init          # setup config\n  kanojo daemon init   # install init service\n  kanojo daemon start  # start daemon\n  kanojo               # launch TUI")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -12,29 +13,61 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Initialize Kanojo configuration")]
+    #[command(long_about = "Interactive setup wizard. Creates config.toml with your name, companion name, persona, and LLM settings.\n\nConfig: ~/.config/kanojo/config.toml")]
     Init,
+
+    #[command(about = "Configure LLM connection")]
+    #[command(long_about = "Set or update LLM provider: base URL, model, and API key.\n\nDefault: 127.0.0.1:1234/v1 (llama.cpp, ollama, etc.)")]
     Connect,
+
+    #[command(about = "Manage the kanojod daemon")]
     Daemon {
         #[command(subcommand)]
         action: Option<DaemonAction>,
     },
+
+    #[command(about = "Configure Telegram gateway")]
+    #[command(long_about = "Set up Telegram bot integration. Requires a bot token from @BotFather.\n\nStores token and allowed chat IDs in config.toml.")]
     Gateway,
 }
 
 #[derive(Subcommand)]
 enum InitSystem {
+    #[command(about = "Systemd user service (most desktop Linux)")]
     Systemd,
+
+    #[command(about = "OpenRC init script (Gentoo, Alpine, Artix)")]
     Openrc,
+
+    #[command(about = "Runit service directory (Void, Artix)")]
     Runit,
+
+    #[command(about = "Auto-detect init system (default)")]
+    #[command(long_about = "Detects running init system: systemd, openrc, or runit.\nFalls back to direct process management if none found.")]
     Auto,
 }
 
 #[derive(Subcommand)]
 enum DaemonAction {
+    #[command(about = "Start the kanojod daemon")]
+    #[command(long_about = "Starts kanojod in the background. Uses init system if available, otherwise spawns directly.\n\nSocket: $XDG_RUNTIME_DIR/kanojo.sock")]
     Start,
+
+    #[command(about = "Stop the kanojod daemon")]
+    #[command(long_about = "Sends SIGTERM to kanojod and cleans up the socket file.")]
     Stop,
+
+    #[command(about = "Check if kanojod is running")]
+    #[command(long_about = "Shows daemon status and PID if running.")]
     Status,
+
+    #[command(about = "Restart the kanojod daemon")]
+    #[command(long_about = "Stops then starts kanojod. Requires init system (systemd/openrc/runit).")]
     Restart,
+
+    #[command(about = "Install kanojod into system init")]
+    #[command(long_about = "Generates and installs a service file for your init system.\n\n  systemd: ~/.config/systemd/user/kanojod.service\n  openrc:  /etc/init.d/kanojod\n  runit:   /etc/sv/kanojod/run")]
     Init {
         #[command(subcommand)]
         system: Option<InitSystem>,
