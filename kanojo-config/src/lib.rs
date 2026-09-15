@@ -57,7 +57,7 @@ impl Default for Config {
             llm: LlmConfig {
                 provider: "openai-compatible".into(),
                 model: "deepseek-chat".into(),
-                base_url: "http://127.0.0.1:8080/v1".into(),
+                base_url: "http://127.0.0.1:1234/v1".into(),
                 api_key: None,
                 temperature: 0.8,
                 max_tokens: 512,

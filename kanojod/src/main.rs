@@ -65,6 +65,22 @@ impl LlmClient {
         }
     }
 
+    async fn detect_model(&self) -> Option<String> {
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let mut req = self.http.get(&url);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req.send().await.ok()?;
+        let body: serde_json::Value = resp.json().await.ok()?;
+        body["data"]
+            .as_array()?
+            .first()?
+            .get("id")?
+            .as_str()
+            .map(String::from)
+    }
+
     async fn chat(&self, system: &str, user_msg: &str) -> Result<String> {
         let body = ChatRequest {
             model: self.model.clone(),
@@ -237,7 +253,8 @@ impl Daemon {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config = Config::load()?;
+    #[allow(unused_mut)]
+    let mut config = Config::load()?;
     let db_path = &config.daemon.db_path;
     if let Some(parent) = std::path::Path::new(db_path).parent() {
         std::fs::create_dir_all(parent)?;
@@ -250,6 +267,18 @@ async fn main() -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(&sock_path);
+
+    let mut config = config;
+    let probe = LlmClient::from_config(&config);
+    if let Some(detected) = probe.detect_model().await {
+        let is_placeholder = config.llm.model.is_empty()
+            || config.llm.model == "deepseek-chat"
+            || config.llm.model == "gpt-3.5-turbo";
+        if is_placeholder {
+            tracing::info!("detected model: {}", detected);
+            config.llm.model = detected;
+        }
+    }
 
     let daemon = Daemon::new(db, config);
 
