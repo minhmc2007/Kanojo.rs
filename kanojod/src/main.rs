@@ -279,14 +279,20 @@ async fn main() -> Result<()> {
                     Ok(req) => {
                         let result = match req.method.as_str() {
                             "send_message" => {
-                                let params: SendMessageParams =
-                                    serde_json::from_value(req.params).unwrap();
-                                match daemon.handle_send_message(&params.channel, &params.text).await
-                                {
-                                    Ok(reply) => serde_json::to_value(reply).unwrap(),
+                                match serde_json::from_value::<SendMessageParams>(req.params) {
+                                    Ok(params) => {
+                                        match daemon.handle_send_message(&params.channel, &params.text).await
+                                        {
+                                            Ok(reply) => serde_json::to_value(reply).unwrap(),
+                                            Err(e) => {
+                                                tracing::error!("handle_send_message: {}", e);
+                                                serde_json::json!({"error": e.to_string()})
+                                            }
+                                        }
+                                    }
                                     Err(e) => {
-                                        tracing::error!("handle_send_message: {}", e);
-                                        serde_json::json!({"error": e.to_string()})
+                                        tracing::error!("invalid send_message params: {}", e);
+                                        serde_json::json!({"error": format!("invalid params: {}", e)})
                                     }
                                 }
                             }
