@@ -250,7 +250,7 @@ async fn main() -> Result<()> {
     }
     let _ = std::fs::remove_file(&sock_path);
 
-    let daemon = Daemon::new(Database::open(db_path)?, config);
+    let daemon = Daemon::new(db, config);
 
     let listener = UnixListener::bind(&sock_path)?;
     tracing::info!("kanojod listening on {}", sock_path.display());
