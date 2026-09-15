@@ -338,9 +338,8 @@ impl Daemon {
             None => {
                 tracing::warn!("failed to extract fields from LLM response, retrying");
                 let correction = format!(
-                    "Your previous response could not be parsed at all. \
-                     Output ONLY this exact JSON, nothing else:\n\
-                     {{\"dialogue\": \"your words here\", \"action_text\": null, \"inner_thought\": null, \"activity\": null}}\n\n\
+                    "Your previous response had invalid JSON. Fix the syntax and reply again with ONLY valid JSON.\n\
+                     Do not copy this template. Generate your own response.\n\
                      Your broken response was:\n{}",
                     raw_reply
                 );
