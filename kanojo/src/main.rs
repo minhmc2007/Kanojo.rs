@@ -13,8 +13,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Initialize Kanojo configuration")]
-    #[command(long_about = "Interactive setup wizard. Creates config.toml with your name, companion name, persona, and LLM settings.\n\nConfig: ~/.config/kanojo/config.toml")]
+    #[command(about = "Interactive setup wizard")]
+    #[command(long_about = "Guides you through: user info, companion personality, LLM connection, and daemon service installation.")]
     Init,
 
     #[command(about = "Configure LLM connection")]
@@ -105,19 +105,61 @@ fn prompt_with_default(label: &str, current: &str) -> Result<String> {
 }
 
 fn cmd_init() -> Result<()> {
-    let mut config = Config::default();
+    let mut config = Config::load().unwrap_or_default();
 
+    println!("=== Kanojo Setup Wizard ===\n");
+
+    // Step 1: User
+    println!("--- Step 1: Your Info ---");
     let val = prompt_with_default("Your name", &config.user.name)?;
     config.user.name = val;
 
+    // Step 2: Companion
+    println!("\n--- Step 2: Companion ---");
     let val = prompt_with_default("Companion name", &config.companion.name)?;
     config.companion.name = val;
-
     let val = prompt_with_default("Persona", &config.companion.persona)?;
     config.companion.persona = val;
 
+    // Step 3: LLM
+    println!("\n--- Step 3: LLM ---");
+    let val = prompt_with_default("Base URL", &config.llm.base_url)?;
+    config.llm.base_url = val;
+    let val = prompt_with_default("Model (leave empty to auto-detect)", &config.llm.model)?;
+    config.llm.model = val;
+    let current_key = config.llm.api_key.as_deref().unwrap_or("");
+    let val = prompt_with_default("API key (optional)", current_key)?;
+    config.llm.api_key = if val.is_empty() { None } else { Some(val) };
+
     config.save()?;
-    println!("Config saved to {}", config_path().display());
+    println!("\nConfig saved to {}", config_path().display());
+
+    // Step 4: Init system
+    println!("\n--- Step 4: Daemon Service ---");
+    let sys = detect_init_system();
+    if sys == "none" {
+        println!("No init system detected. You can start the daemon manually with: kanojo daemon start");
+    } else {
+        println!("Detected init system: {}", sys);
+        print!("Install daemon service? [Y/n]: ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
+            let init_sys = match sys {
+                "systemd" => InitSystem::Systemd,
+                "openrc" => InitSystem::Openrc,
+                "runit" => InitSystem::Runit,
+                _ => InitSystem::Auto,
+            };
+            cmd_daemon_init(Some(init_sys))?;
+        } else {
+            println!("Skipped. Install later with: kanojo daemon init");
+        }
+    }
+
+    println!("\nSetup complete! Start with: kanojo");
     Ok(())
 }
 
