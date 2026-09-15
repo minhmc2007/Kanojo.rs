@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
+#[derive(Clone)]
 struct LlmClient {
     http: Client,
     base_url: String,
@@ -265,17 +266,7 @@ async fn main() -> Result<()> {
         };
         let daemon = Daemon {
             db: Arc::clone(&daemon.db),
-            llm: LlmClient {
-                http: Client::builder()
-                    .timeout(Duration::from_secs(60))
-                    .build()
-                    .expect("failed to build HTTP client"),
-                base_url: daemon.llm.base_url.clone(),
-                model: daemon.llm.model.clone(),
-                api_key: daemon.llm.api_key.clone(),
-                temperature: daemon.llm.temperature,
-                max_tokens: daemon.llm.max_tokens,
-            },
+            llm: daemon.llm.clone(),
             config: daemon.config.clone(),
         };
 
