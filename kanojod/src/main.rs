@@ -206,8 +206,27 @@ impl Daemon {
         let dialogue = parsed["dialogue"]
             .as_str()
             .unwrap_or("...")
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.starts_with("activity:")
+                    && !trimmed.starts_with("affection:")
+                    && !trimmed.starts_with("anger:")
+                    && !trimmed.starts_with("intimacy:")
+                    && !trimmed.starts_with("emotion:")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
             .to_string();
-        let action_text = parsed["action_text"].as_str().map(String::from);
+        let action_text = parsed["action_text"].as_str().map(|a| {
+            let trimmed = a.trim();
+            if trimmed.starts_with('*') && trimmed.ends_with('*') {
+                trimmed[1..trimmed.len() - 1].trim().to_string()
+            } else {
+                trimmed.to_string()
+            }
+        });
         let inner_thought = parsed["inner_thought"].as_str().map(String::from);
         let new_activity = parsed["activity"].as_str().map(String::from);
 
@@ -243,6 +262,7 @@ impl Daemon {
             action_text,
             dialogue: final_dialogue,
             inner_thought,
+            activity: new_activity,
             emotion,
             typing_delay_ms: typing_delay,
         })

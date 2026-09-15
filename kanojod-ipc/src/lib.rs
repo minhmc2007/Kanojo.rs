@@ -39,6 +39,7 @@ pub struct CompanionReply {
     pub action_text: Option<String>,
     pub dialogue: String,
     pub inner_thought: Option<String>,
+    pub activity: Option<String>,
     pub emotion: String,
     pub typing_delay_ms: u64,
 }

@@ -755,7 +755,7 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState, config: &Conf
                             .fg(Color::Green)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(dialogue.clone()),
+                    Span::raw(format!("\"{}\"", dialogue)),
                 ]));
                 if let Some(t) = thought {
                     lines.push(Line::from(Span::styled(
@@ -1277,6 +1277,9 @@ fn cmd_tui() -> Result<()> {
                     let thought = resp.result["inner_thought"].as_str().map(String::from);
                     if let Some(e) = resp.result["emotion"].as_str() {
                         state.emotion = e.to_string();
+                    }
+                    if let Some(a) = resp.result["activity"].as_str() {
+                        state.activity = a.to_string();
                     }
                     state.push_entry(ChatEntry::Companion {
                         action,
