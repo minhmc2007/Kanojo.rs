@@ -132,6 +132,119 @@ struct Daemon {
     config: Config,
 }
 
+fn extract_field(s: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let key_pos = s.find(&needle)?;
+    let after_key = &s[key_pos + needle.len()..];
+    let colon_pos = after_key.find(':')?;
+    let val_start = after_key[colon_pos + 1..].trim_start();
+
+    if val_start.starts_with("null") {
+        return Some("null".to_string());
+    }
+
+    if val_start.starts_with('"') {
+        // Quoted string — find matching close quote (accounting for escapes)
+        let bytes = val_start.as_bytes();
+        let mut i = 1; // skip opening quote
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                let raw = &val_start[1..i];
+                return Some(raw.replace("\\\"", "\""));
+            }
+            i += 1;
+        }
+        // Unterminated quote — take rest of string
+        return Some(val_start[1..].trim().trim_matches('*').to_string());
+    }
+
+    // Unquoted value — find end at comma or closing brace
+    let bytes = val_start.as_bytes();
+    let mut end = bytes.len();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b',' || b == b'}' {
+            end = i;
+            break;
+        }
+    }
+    Some(val_start[..end].trim().trim_matches('*').to_string())
+}
+
+fn parse_llm_json(raw: &str) -> Option<serde_json::Value> {
+    let trimmed = raw.trim();
+
+    // Strip thinking tags
+    let s = if let Some(start) = trimmed.find("<think>") {
+        if let Some(end) = trimmed.find("</think>") {
+            format!("{}{}", &trimmed[..start], &trimmed[end + 8..])
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+
+    // Strip code fences
+    let s = if s.starts_with("```") {
+        let inner = s.trim_start_matches('`').trim_end_matches('`');
+        inner
+            .strip_prefix("json")
+            .or_else(|| inner.strip_prefix("JSON"))
+            .unwrap_or(inner)
+            .trim()
+            .to_string()
+    } else {
+        s
+    };
+
+    // Try standard parse first
+    let attempt = if s.starts_with('{') && !s.ends_with('}') {
+        format!("{}}}", s)
+    } else {
+        s.clone()
+    };
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&attempt) {
+        return Some(v);
+    }
+
+    // Brute force: extract each field and build clean JSON
+    let dialogue = extract_field(&s, "dialogue").unwrap_or_default();
+    let action_text = extract_field(&s, "action_text").unwrap_or_default();
+    let inner_thought = extract_field(&s, "inner_thought").unwrap_or_default();
+    let activity = extract_field(&s, "activity").unwrap_or_default();
+
+    if dialogue.is_empty() && action_text.is_empty() && inner_thought.is_empty() && activity.is_empty() {
+        return None;
+    }
+
+    let at_val = if action_text == "null" || action_text.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(action_text)
+    };
+    let it_val = if inner_thought == "null" || inner_thought.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(inner_thought)
+    };
+    let act_val = if activity == "null" || activity.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(activity)
+    };
+
+    Some(serde_json::json!({
+        "dialogue": dialogue,
+        "action_text": at_val,
+        "inner_thought": it_val,
+        "activity": act_val,
+    }))
+}
+
 impl Daemon {
     fn new(db: Database, config: Config) -> Self {
         let llm = LlmClient::from_config(&config);
@@ -171,21 +284,29 @@ impl Daemon {
              - Anger: {anger}/100\n\
              - Affection: {affection}/100\n\
              - Intimacy: {intimacy}/100\n\n\
-             Respond with ONLY a JSON object. No markdown, no code fences, no text before or after.\n\n\
-             Example:\n\
-             {{\"dialogue\": \"hello\", \"action_text\": \"waves\", \"inner_thought\": null, \"activity\": \"Idle\"}}\n\n\
-             Fields:\n\
-             - dialogue: your spoken words (string)\n\
-             - action_text: one physical action or null (string|null)\n\
-             - inner_thought: private thought or null (string|null)\n\
-             - activity: one of Studying, Cooking, Gaming, Reading, Idle, Walking, Eating\n\n\
-             Rules:\n\
-             - Stay in character as {companion_name}. Your emotion shapes your tone.\n\
-             - If angry: short, cold replies. If affectionate: warm and gentle.\n\
-             - Keep replies short and natural, like a real text conversation.\n\
-             - dialogue contains ONLY what you say aloud. No asterisks, no metadata.\n\
-             - Do NOT include emotion numbers, activity stats, or any metadata in your response.\n\
-             - Do NOT output reasoning or thinking process. ONLY the JSON object.\n\n\
+             OUTPUT FORMAT - STRICT JSON ONLY:\n\
+             Your entire response must be exactly this structure, nothing else:\n\
+             {{\"dialogue\": \"what you say\", \"action_text\": \"one action or null\", \"inner_thought\": \"thought or null\", \"activity\": \"one of: Studying, Cooking, Gaming, Reading, Idle, Walking, Eating\"}}\n\n\
+             CRITICAL RULES:\n\
+             - EVERY string value MUST be in double quotes. Example: \"action_text\": \"waves hello\"\n\
+             - Use the literal word null (no quotes) for empty fields: \"action_text\": null\n\
+             - dialogue: ONLY your spoken words as a plain string. No asterisks, no actions, no metadata.\n\
+             - action_text: ONE physical action as a quoted string, or null. No asterisks.\n\
+             - inner_thought: a quoted string, or null.\n\
+             - activity: a quoted string from the allowed list, or null.\n\
+             - NEVER put a JSON object inside another field's value.\n\
+             - NEVER use asterisks * around text.\n\
+             - NEVER output thinking tokens, reasoning, or explanation.\n\
+             - NEVER wrap JSON in code fences or markdown.\n\
+             - Output ONLY the raw JSON object. Nothing before, nothing after.\n\n\
+             WRONG: {{\"dialogue\": \"hi\", \"action_text\": *waves*}}\n\
+             RIGHT: {{\"dialogue\": \"hi\", \"action_text\": \"waves\"}}\n\
+             WRONG: {{\"dialogue\": {{\"text\": \"hi\"}}}}\n\
+             RIGHT: {{\"dialogue\": \"hi\", \"action_text\": null}}\n\n\
+             Stay in character as {companion_name}. Your emotion shapes your tone.\n\
+             If angry: short, cold. If affectionate: warm and gentle.\n\
+             Keep replies short and natural.\n\
+             /no_think\n\n\
              RECENT CONVERSATION:\n{history}"
         )
     }
@@ -201,31 +322,56 @@ impl Daemon {
         let system_prompt = self.build_system_prompt().await;
         let raw_reply = self.llm.chat(&system_prompt, text).await?;
 
-        let trimmed = raw_reply.trim().to_string();
-        let json_str = if trimmed.starts_with('{') && !trimmed.ends_with('}') {
-            format!("{}}}", trimmed)
-        } else {
-            trimmed
+        let parsed = match parse_llm_json(&raw_reply) {
+            Some(v) => v,
+            None => {
+                tracing::warn!("failed to extract fields from LLM response, retrying");
+                let correction = format!(
+                    "Your previous response could not be parsed at all. \
+                     Output ONLY this exact JSON, nothing else:\n\
+                     {{\"dialogue\": \"your words here\", \"action_text\": null, \"inner_thought\": null, \"activity\": null}}\n\n\
+                     Your broken response was:\n{}",
+                    raw_reply
+                );
+                let retry_reply = self.llm.chat(&correction, text).await?;
+                parse_llm_json(&retry_reply).unwrap_or_else(|| {
+                    serde_json::json!({
+                        "dialogue": "...",
+                        "action_text": null,
+                        "inner_thought": null,
+                    })
+                })
+            }
         };
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json_str).unwrap_or(serde_json::json!({
-                "dialogue": raw_reply.trim().trim_matches('"'),
-                "action_text": null,
-                "inner_thought": null,
-            }));
 
         let dialogue = parsed["dialogue"]
             .as_str()
-            .unwrap_or("...")
+            .map(|d| {
+                // If dialogue itself contains JSON-like structure, try to extract the actual spoken text
+                let trimmed_d = d.trim();
+                if trimmed_d.starts_with('{') {
+                    if let Some(inner) = parse_llm_json(trimmed_d) {
+                        return inner["dialogue"]
+                            .as_str()
+                            .unwrap_or(trimmed_d)
+                            .to_string();
+                    }
+                }
+                trimmed_d.to_string()
+            })
+            .unwrap_or_else(|| "...".to_string());
+        // Strip lines that look like metadata
+        let dialogue = dialogue
             .lines()
             .filter(|line| {
-                let trimmed = line.trim();
-                !trimmed.starts_with("activity:")
-                    && !trimmed.starts_with("affection:")
-                    && !trimmed.starts_with("anger:")
-                    && !trimmed.starts_with("intimacy:")
-                    && !trimmed.starts_with("emotion:")
+                let t = line.trim();
+                !t.starts_with("activity:")
+                    && !t.starts_with("affection:")
+                    && !t.starts_with("anger:")
+                    && !t.starts_with("intimacy:")
+                    && !t.starts_with("emotion:")
+                    && !t.starts_with('{')
+                    && !t.starts_with('}')
             })
             .collect::<Vec<_>>()
             .join("\n")

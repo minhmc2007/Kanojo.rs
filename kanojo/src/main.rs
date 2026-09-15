@@ -347,29 +347,50 @@ fn cmd_daemon_init(system: Option<InitSystem>) -> Result<()> {
 
     match sys {
         "systemd" => {
+            let kanojod_path = std::process::Command::new("which")
+                .arg("kanojod")
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.join("kanojod").to_string_lossy().into_owned()))
+                })
+                .unwrap_or_else(|| "/usr/bin/kanojod".into());
+
             let service_dir = dirs::home_dir()
                 .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
                 .join(".config/systemd/user");
             std::fs::create_dir_all(&service_dir)?;
             std::fs::write(
                 service_dir.join("kanojod.service"),
-                "[Unit]\n\
-                 Description=Kanojo companion daemon\n\
-                 After=network.target\n\
-                 \n\
-                 [Service]\n\
-                 Type=simple\n\
-                 ExecStart=%h/.cargo/bin/kanojod\n\
-                 Restart=on-failure\n\
-                 RestartSec=5\n\
-                 \n\
-                 [Install]\n\
-                 WantedBy=default.target\n",
+                format!(
+                    "[Unit]\n\
+                     Description=Kanojo companion daemon\n\
+                     After=network.target\n\
+                     \n\
+                     [Service]\n\
+                     Type=simple\n\
+                     ExecStart={kanojod_path}\n\
+                     Restart=on-failure\n\
+                     RestartSec=5\n\
+                     \n\
+                     [Install]\n\
+                     WantedBy=default.target\n"
+                ),
             )?;
             run_init_cmd("systemctl", &["--user", "daemon-reload"])?;
             run_init_cmd("systemctl", &["--user", "enable", "kanojod"])?;
             println!(
-                "Systemd user service installed. Start with: systemctl --user start kanojod"
+                "Systemd user service installed ({}). Start with: systemctl --user start kanojod",
+                kanojod_path
             );
         }
         "openrc" => {
