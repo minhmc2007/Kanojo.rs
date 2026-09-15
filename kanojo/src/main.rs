@@ -22,10 +22,23 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum InitSystem {
+    Systemd,
+    Openrc,
+    Runit,
+    Auto,
+}
+
+#[derive(Subcommand)]
 enum DaemonAction {
     Start,
     Stop,
     Status,
+    Restart,
+    Init {
+        #[command(subcommand)]
+        system: Option<InitSystem>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -94,35 +107,238 @@ fn cmd_connect() -> Result<()> {
     Ok(())
 }
 
+fn detect_init_system() -> &'static str {
+    if std::path::Path::new("/run/systemd/system").exists() {
+        return "systemd";
+    }
+    if std::process::Command::new("rc-status").output().is_ok() {
+        return "openrc";
+    }
+    if std::process::Command::new("which")
+        .arg("runsv")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return "runit";
+    }
+    "none"
+}
+
+fn run_init_cmd(cmd: &str, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run {}: {}", cmd, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{} failed: {}", cmd, stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn cmd_daemon_systemctl(action: &str) -> Result<()> {
+    run_init_cmd("systemctl", &["--user", action, "kanojod"])?;
+    Ok(())
+}
+
+fn cmd_daemon_openrc(action: &str) -> Result<()> {
+    if action == "enable" {
+        run_init_cmd("rc-update", &["add", "kanojod", "default"])?;
+    } else {
+        run_init_cmd("rc-service", &["kanojod", action])?;
+    }
+    Ok(())
+}
+
+fn cmd_daemon_runit(action: &str) -> Result<()> {
+    match action {
+        "start" | "restart" => {
+            run_init_cmd("sv", &["up", "/etc/sv/kanojod"])?;
+        }
+        "stop" => {
+            run_init_cmd("sv", &["down", "/etc/sv/kanojod"])?;
+        }
+        "status" => {
+            run_init_cmd("sv", &["status", "/etc/sv/kanojod"])?;
+        }
+        "enable" => {
+            std::process::Command::new("ln")
+                .args(["-s", "/etc/sv/kanojod", "/var/service/kanojod"])
+                .output()
+                .map_err(|e| anyhow::anyhow!("failed to create symlink: {}", e))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn cmd_daemon_init(system: Option<InitSystem>) -> Result<()> {
+    let sys = match system.as_ref().unwrap_or(&InitSystem::Auto) {
+        InitSystem::Auto => detect_init_system(),
+        InitSystem::Systemd => "systemd",
+        InitSystem::Openrc => "openrc",
+        InitSystem::Runit => "runit",
+    };
+
+    match sys {
+        "systemd" => {
+            let service_dir = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
+                .join(".config/systemd/user");
+            std::fs::create_dir_all(&service_dir)?;
+            std::fs::write(
+                service_dir.join("kanojod.service"),
+                "[Unit]\n\
+                 Description=Kanojo companion daemon\n\
+                 After=network.target\n\
+                 \n\
+                 [Service]\n\
+                 Type=simple\n\
+                 ExecStart=%h/.cargo/bin/kanojod\n\
+                 Restart=on-failure\n\
+                 RestartSec=5\n\
+                 \n\
+                 [Install]\n\
+                 WantedBy=default.target\n",
+            )?;
+            run_init_cmd("systemctl", &["--user", "daemon-reload"])?;
+            run_init_cmd("systemctl", &["--user", "enable", "kanojod"])?;
+            println!(
+                "Systemd user service installed. Start with: systemctl --user start kanojod"
+            );
+        }
+        "openrc" => {
+            let script = "#!/sbin/openrc-run\n\
+                          \n\
+                          command=/usr/bin/kanojod\n\
+                          command_background=true\n\
+                          pidfile=/run/kanojod.pid\n\
+                          description=\"Kanojo companion daemon\"\n\
+                          \n\
+                          depend() {\n\
+                          \tneed net\n\
+                          }\n";
+            std::fs::write("/etc/init.d/kanojod", script)?;
+            std::process::Command::new("chmod")
+                .args(["+x", "/etc/init.d/kanojod"])
+                .output()?;
+            run_init_cmd("rc-update", &["add", "kanojod", "default"])?;
+            println!("OpenRC init script installed. Start with: rc-service kanojod start");
+        }
+        "runit" => {
+            let sv_dir = std::path::Path::new("/etc/sv/kanojod");
+            std::fs::create_dir_all(sv_dir)?;
+            std::fs::write(
+                sv_dir.join("run"),
+                "#!/bin/sh\nexec kanojod 2>&1\n",
+            )?;
+            std::process::Command::new("chmod")
+                .args(["+x"])
+                .arg(sv_dir.join("run"))
+                .output()?;
+            if !std::path::Path::new("/var/service/kanojod").exists() {
+                std::process::Command::new("ln")
+                    .args(["-s", "/etc/sv/kanojod", "/var/service/kanojod"])
+                    .output()?;
+            }
+            println!("Runit service installed. Start with: sv up /etc/sv/kanojod");
+        }
+        _ => {
+            println!(
+                "No supported init system detected. Use 'kanojo daemon start' for manual management."
+            );
+        }
+    }
+    Ok(())
+}
+
 fn cmd_daemon(action: Option<DaemonAction>) -> Result<()> {
+    let init = detect_init_system();
+
     match action {
         Some(DaemonAction::Start) | None => {
-            println!("Starting kanojod...");
-            std::process::Command::new("kanojod")
-                .spawn()
-                .map_err(|e| anyhow::anyhow!("failed to start kanojod: {}", e))?;
-            println!("kanojod started.");
+            if init == "systemd" {
+                cmd_daemon_systemctl("start")?;
+                println!("kanojod started via systemd.");
+            } else if init == "openrc" {
+                cmd_daemon_openrc("start")?;
+                println!("kanojod started via openrc.");
+            } else if init == "runit" {
+                cmd_daemon_runit("start")?;
+                println!("kanojod started via runit.");
+            } else {
+                println!("Starting kanojod...");
+                std::process::Command::new("kanojod")
+                    .spawn()
+                    .map_err(|e| anyhow::anyhow!("failed to start kanojod: {}", e))?;
+                println!("kanojod started.");
+            }
         }
         Some(DaemonAction::Stop) => {
-            println!("Stopping kanojod...");
-            std::process::Command::new("pkill")
-                .arg("kanojod")
-                .output()?;
-            println!("kanojod stopped.");
+            if init == "systemd" {
+                cmd_daemon_systemctl("stop")?;
+                println!("kanojod stopped via systemd.");
+            } else if init == "openrc" {
+                cmd_daemon_openrc("stop")?;
+                println!("kanojod stopped via openrc.");
+            } else if init == "runit" {
+                cmd_daemon_runit("stop")?;
+                println!("kanojod stopped via runit.");
+            } else {
+                println!("Stopping kanojod...");
+                std::process::Command::new("pkill")
+                    .arg("kanojod")
+                    .output()?;
+                println!("kanojod stopped.");
+            }
         }
         Some(DaemonAction::Status) => {
-            let output = std::process::Command::new("pgrep")
-                .arg("-x")
-                .arg("kanojod")
-                .output()?;
-            if output.status.success() {
-                println!(
-                    "kanojod is running (pid: {})",
-                    String::from_utf8_lossy(&output.stdout).trim()
-                );
+            if init == "systemd" {
+                cmd_daemon_systemctl("status")?;
+            } else if init == "openrc" {
+                cmd_daemon_openrc("status")?;
+            } else if init == "runit" {
+                cmd_daemon_runit("status")?;
             } else {
-                println!("kanojod is not running.");
+                let output = std::process::Command::new("pgrep")
+                    .arg("-x")
+                    .arg("kanojod")
+                    .output()?;
+                if output.status.success() {
+                    println!(
+                        "kanojod is running (pid: {})",
+                        String::from_utf8_lossy(&output.stdout).trim()
+                    );
+                } else {
+                    println!("kanojod is not running.");
+                }
             }
+        }
+        Some(DaemonAction::Restart) => {
+            if init == "systemd" {
+                cmd_daemon_systemctl("restart")?;
+                println!("kanojod restarted via systemd.");
+            } else if init == "openrc" {
+                cmd_daemon_openrc("restart")?;
+                println!("kanojod restarted via openrc.");
+            } else if init == "runit" {
+                cmd_daemon_runit("restart")?;
+                println!("kanojod restarted via runit.");
+            } else {
+                println!("Restarting kanojod...");
+                std::process::Command::new("pkill")
+                    .arg("kanojod")
+                    .output()?;
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::process::Command::new("kanojod")
+                    .spawn()
+                    .map_err(|e| anyhow::anyhow!("failed to start kanojod: {}", e))?;
+                println!("kanojod restarted.");
+            }
+        }
+        Some(DaemonAction::Init { system }) => {
+            cmd_daemon_init(system)?;
         }
     }
     Ok(())
