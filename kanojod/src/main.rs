@@ -265,37 +265,11 @@ impl Daemon {
         let persona = &self.config.companion.persona;
 
         format!(
-            "You are {companion_name}, a virtual companion. {persona}\n\
-             User is {user_name}.\n\n\
-             CURRENT STATE:\n\
-             - Emotion: {emotion}\n\
-             - Activity: {activity}\n\
-             - Anger: {anger}/100\n\
-             - Affection: {affection}/100\n\
-             - Intimacy: {intimacy}/100\n\n\
-             OUTPUT FORMAT - STRICT JSON ONLY:\n\
-             Your entire response must be exactly this structure, nothing else:\n\
-             {{\"dialogue\": \"what you say\", \"action_text\": \"one action or null\", \"inner_thought\": \"thought or null\", \"activity\": \"one of: Studying, Cooking, Gaming, Reading, Idle, Walking, Eating\"}}\n\n\
-             CRITICAL RULES:\n\
-             - EVERY string value MUST be in double quotes. Example: \"action_text\": \"waves hello\"\n\
-             - Use the literal word null (no quotes) for empty fields: \"action_text\": null\n\
-             - dialogue: ONLY your spoken words as a plain string. No asterisks, no actions, no metadata.\n\
-             - action_text: ONE physical action as a quoted string, or null. No asterisks.\n\
-             - inner_thought: a quoted string, or null.\n\
-             - activity: a quoted string from the allowed list, or null.\n\
-             - NEVER put a JSON object inside another field's value.\n\
-             - NEVER use asterisks * around text.\n\
-             - NEVER output thinking tokens, reasoning, or explanation.\n\
-             - NEVER wrap JSON in code fences or markdown.\n\
-             - Output ONLY the raw JSON object. Nothing before, nothing after.\n\n\
-             WRONG: {{\"dialogue\": \"hi\", \"action_text\": *waves*}}\n\
-             RIGHT: {{\"dialogue\": \"hi\", \"action_text\": \"waves\"}}\n\
-             WRONG: {{\"dialogue\": {{\"text\": \"hi\"}}}}\n\
-             RIGHT: {{\"dialogue\": \"hi\", \"action_text\": null}}\n\n\
-             Stay in character as {companion_name}. Your emotion shapes your tone.\n\
-             If angry: short, cold. If affectionate: warm and gentle.\n\
-             Keep replies short and natural.\n\
-             /no_think"
+            "You are {companion_name}, {persona} User is {user_name}.\n\
+             State: emotion={emotion}, activity={activity}, anger={anger}/100, affection={affection}/100, intimacy={intimacy}/100.\n\n\
+             Reply with ONLY valid JSON, no other text:\n\
+             {{\"dialogue\": \"your spoken reply\", \"action_text\": \"action or null\", \"inner_thought\": \"thought or null\", \"activity\": \"one of: Studying, Cooking, Gaming, Reading, Idle, Walking, Eating\"}}\n\n\
+             Rules: dialogue is plain text only. Use null for empty fields. Stay in character as {companion_name}."
         )
     }
 
@@ -315,6 +289,13 @@ impl Daemon {
         });
         for (sender, _channel, dialogue) in history.iter().rev() {
             let role = if sender == "user" { "user" } else { "assistant" };
+            if let Some(last) = messages.last_mut() {
+                if last.role == role {
+                    last.content.push_str("\n");
+                    last.content.push_str(dialogue);
+                    continue;
+                }
+            }
             messages.push(ChatMessage {
                 role: role.into(),
                 content: dialogue.clone(),
